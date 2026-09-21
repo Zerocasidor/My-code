@@ -6,7 +6,7 @@ import struct
 from pydobot import Dobot
 from pydobot.message import Message
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings(0.6-0.7).json")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_settings.json")
 
 DEFAULT_SETTINGS = {
     "port": "/dev/ttyUSB0",
@@ -39,7 +39,7 @@ def load_settings():
     except FileNotFoundError:
         pass
     except Exception as e:
-        print(f"⚠️ อ่าน settings(0.6-0.7).json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
+        print(f"⚠️ อ่าน smart_settings.json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
     return s
 
 
@@ -47,7 +47,7 @@ def save_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4, ensure_ascii=False)
-        print("💾 บันทึก settings(0.6-0.7).json แล้ว")
+        print("💾 บันทึก smart_settings.json แล้ว")
     except Exception as e:
         print(f"❌ บันทึกไม่สำเร็จ: {e}")
 

@@ -9,7 +9,7 @@ import importlib.util
 from pydobot import Dobot
 from pydobot.message import Message
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings(0.6-0.7).json")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_settings.json")
 
 DEFAULT_SETTINGS = {
     "port": "/dev/ttyUSB0",
@@ -19,6 +19,8 @@ DEFAULT_SETTINGS = {
     "ground_z": None,
     "grip_offset": 0.0,
     "order": [1, 2, 3, 4],
+    "colors": ["g", "r", "y", "b"],
+    "flip_camera": True,   # กล้องอยู่ฝั่งตรงข้ามหุ่น ภาพจึงกลับด้าน 180°
     "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_last")},
 }
 
@@ -32,8 +34,12 @@ GRID_LAYOUT = {1: (0, 0), 2: (0, 1), 3: (0, 2),
 
 # ฝั่งกล้อง: ไฟล์ camara_x.x.py เวอร์ชันล่าสุดในโฟลเดอร์ high-level
 CAMERA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "high-level")
-# ชื่อฟังก์ชันที่จะเรียกหาในไฟล์กล้อง (ตัวแรกที่เจอจะถูกใช้) ต้องคืนลำดับบล็อก 4 ตัว เช่น [3, 5, 8, 2]
-CAMERA_FUNCS = ("get_order", "get_block_order", "detect_order")
+# ฟังก์ชันในไฟล์กล้องที่จะเรียกหา (ตัวแรกที่เจอถูกใช้) ต้องคืน {ช่อง: สี} เช่น {1: "g", 3: "r", ...}
+CAMERA_FUNCS = ("get_blocks", "detect_blocks")
+
+COLORS = {"g": "เขียว", "r": "แดง", "y": "เหลือง", "b": "ฟ้า"}
+# ภาพกล้องกลับด้าน 180° กับฝั่งหุ่น: ช่องตรงข้ามกันคือ 1<->8, 2<->7, 3<->6, 4<->5
+FLIP_CELL = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
 
 
 def load_settings():
@@ -47,7 +53,7 @@ def load_settings():
     except FileNotFoundError:
         pass
     except Exception as e:
-        print(f"⚠️ อ่าน settings(0.6-0.7).json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
+        print(f"⚠️ อ่าน smart_settings.json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
     return s
 
 
@@ -55,7 +61,7 @@ def save_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4, ensure_ascii=False)
-        print("💾 บันทึก settings(0.6-0.7).json แล้ว")
+        print("💾 บันทึก smart_settings.json แล้ว")
     except Exception as e:
         print(f"❌ บันทึกไม่สำเร็จ: {e}")
 
@@ -206,8 +212,8 @@ def latest_camera_file():
     return max(files, key=version) if files else None
 
 
-def order_from_camera():
-    """ขอลำดับบล็อกจากไฟล์กล้องเวอร์ชันล่าสุด คืน None ถ้าใช้ไม่ได้ (ให้ไปกรอกเอง)"""
+def blocks_from_camera(settings):
+    """ขอ {ช่อง: สี} จากไฟล์กล้องเวอร์ชันล่าสุด คืน None ถ้าใช้ไม่ได้ (ให้ไปกรอกเอง)"""
     path = latest_camera_file()
     if not path:
         print(f"📷 ไม่พบไฟล์ camara_*.py ใน {CAMERA_DIR}")
@@ -223,36 +229,98 @@ def order_from_camera():
 
     fn = next((getattr(module, n) for n in CAMERA_FUNCS if callable(getattr(module, n, None))), None)
     if fn is None:
-        print(f"📷 {name} ไม่มีฟังก์ชัน {' / '.join(CAMERA_FUNCS)} ที่คืนลำดับบล็อก")
+        print(f"📷 {name} ไม่มีฟังก์ชัน {' / '.join(CAMERA_FUNCS)}")
         return None
     try:
-        order = valid_order(fn())
+        blocks = fn()
     except Exception as e:
-        print(f"📷 {name} ทำงานผิดพลาด ({e})")
+        print(f"📷 {name}: {e}")
         return None
-    if not order:
-        print(f"📷 {name} คืนค่าที่ใช้ไม่ได้ (ต้องเป็นเลข 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน)")
+
+    try:
+        blocks = {int(cell): str(color) for cell, color in dict(blocks).items()}
+    except Exception:
+        print(f"📷 {name} คืนค่าผิดรูปแบบ (ต้องเป็น dict {{ช่อง: สี}})")
         return None
-    print(f"📷 ได้ลำดับจาก {name}: {' '.join(str(b) for b in order)}")
+    if any(c < 1 or c > 8 for c in blocks) or any(v not in COLORS for v in blocks.values()):
+        print(f"📷 {name} คืนช่องหรือสีที่ไม่รู้จัก: {blocks}")
+        return None
+    if settings.get("flip_camera", True):
+        blocks = {FLIP_CELL[c]: v for c, v in blocks.items()}
+        print("🔄 กลับด้านภาพกล้อง 180° เป็นมุมมองหุ่น (flip_camera)")
+    print(f"📷 {name} เจอบล็อก: " + " ".join(f"{c}={blocks[c]}" for c in sorted(blocks)))
+    return blocks
+
+
+def ask_colors(settings):
+    """กรอกลำดับสี 4 ตัว เช่น 'g r y b' (ซ้ำสีได้ไม่เกินสีละ 2)"""
+    cur = " ".join(settings.get("colors", []))
+    legend = ", ".join(f"{k}={v}" for k, v in COLORS.items())
+    raw = input(f"ลำดับสี 4 ตัว ({legend}) [{cur}] (Enter=ค่าเดิม): ").strip().lower()
+    colors = (raw or cur).replace(",", " ").split()
+    if len(colors) != 4 or any(c not in COLORS for c in colors):
+        print(f"❌ ต้องเป็น {' / '.join(COLORS)} จำนวน 4 ตัว")
+        return None
+    if any(colors.count(c) > 2 for c in colors):
+        print("❌ สีเดียวกันซ้ำได้ไม่เกิน 2 (บนโต๊ะมีสีละ 2 ก้อน)")
+        return None
+    settings["colors"] = colors
+    return colors
+
+
+def near_rank(grid):
+    """จัดอันดับความใกล้หุ่น: ดูแถวก่อน (แถวที่ใกล้ฐานหุ่นสุดมาก่อน) แล้วค่อยดูระยะในแถว"""
+    def dist(cell):
+        p = grid[cell]
+        return math.hypot(p["x"], p["y"])
+
+    rows = {}
+    for cell, (row, _) in GRID_LAYOUT.items():
+        if cell != "c":
+            rows.setdefault(row, []).append(cell)
+    row_order = sorted(rows, key=lambda r: sum(dist(c) for c in rows[r]) / len(rows[r]))
+    return lambda cell: (row_order.index(GRID_LAYOUT[cell][0]), dist(cell))
+
+
+def order_from_colors(colors, blocks, grid):
+    """เลือกบล็อกตามลำดับสี: ปกติเอาก้อนที่ใกล้หุ่นสุด
+    ถ้าสีนั้นอยู่ในลำดับ 2 ครั้ง ให้วางก้อนที่ไกลกว่าก่อน แล้วค่อยก้อนที่ใกล้"""
+    rank = near_rank(grid)
+    by_color = {}
+    for cell, color in blocks.items():
+        by_color.setdefault(color, []).append(cell)
+    for color in by_color:
+        by_color[color].sort(key=rank)   # ใกล้ -> ไกล
+
+    order = [None] * 4
+    for color in set(colors):
+        slots = [i for i, c in enumerate(colors) if c == color]
+        cells = by_color.get(color, [])
+        if len(cells) < len(slots):
+            print(f"❌ สี {color} ({COLORS[color]}) ต้องใช้ {len(slots)} ก้อน แต่กล้องเจอ {len(cells)} ก้อน")
+            return None
+        if len(slots) == 1:
+            order[slots[0]] = cells[0]                    # ใกล้สุด
+        else:
+            order[slots[0]], order[slots[1]] = cells[1], cells[0]   # ไกลก่อน แล้วใกล้
     return order
 
 
-def ask_order(settings):
-    """กรอกลำดับบล็อกเอง 4 ตัวจากทั้งหมด 8 ตัว"""
-    cur = " ".join(str(b) for b in settings.get("order", []))
-    raw = input(f"เลือกลำดับบล็อก 4 ตัว (1-8) เช่น '3 5 8 2' [{cur}] (Enter=ค่าเดิม): ").strip()
-    order = valid_order((raw or cur).replace(",", " ").split())
-    if not order:
-        print("❌ ต้องเป็นเลข 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน")
-        return None
-    return order
-
-
-def get_order(settings, use_camera=True):
-    """ใช้ลำดับจากกล้องก่อน ถ้าไม่ได้ค่อยให้กรอกเอง"""
-    order = order_from_camera() if use_camera else None
-    if not order:
-        order = ask_order(settings)
+def get_order(settings, grid, use_camera=True):
+    """โหมดกล้อง: กรอกลำดับ 'สี' แล้วให้กล้องบอกว่าสีไหนอยู่ช่องไหน
+    ถ้ากล้องใช้ไม่ได้ ตกมาที่การกรอกลำดับ 'ช่อง' เอง"""
+    if use_camera:
+        colors = ask_colors(settings)
+        blocks = blocks_from_camera(settings) if colors else None
+        if blocks:
+            order = order_from_colors(colors, blocks, grid)
+            if order:
+                print("🎨 ลำดับที่ได้: " + " -> ".join(
+                    f"{c}(ช่อง {b})" for c, b in zip(colors, order)))
+                settings["order"] = order
+                return order
+        print("↩️ ใช้การกรอกลำดับช่องเองแทน")
+    order = ask_order(settings)
     if order:
         settings["order"] = order
     return order
@@ -292,7 +360,7 @@ def run_operation(device, settings, use_camera=True):
         print("❌ ยังไม่ได้ตั้ง Ground ใช้ [3] SetGround ก่อน")
         return
 
-    order = get_order(settings, use_camera=use_camera)
+    order = get_order(settings, grid, use_camera=use_camera)
     if not order:
         return
 
@@ -302,10 +370,11 @@ def run_operation(device, settings, use_camera=True):
     center = grid["c"]
 
     # บล็อก 1-4 ต้องย้ายไปพักก่อน ใช้ช่องพักจาก 4 ไป 1 เพื่อป้องกันชน
+    # ยกเว้นลำดับที่ 1-2 เพราะ Tower ยังสูงไม่เกิน 1 ชั้น ไม่มีอะไรให้ชน
     staged = {}
     free_slots = [4, 3, 2, 1]
-    for b in order:
-        if b <= 4:
+    for i, b in enumerate(order):
+        if b <= 4 and i >= 2:
             staged[b] = temps[free_slots.pop(0)]
 
     plan = " -> ".join(f"{b}{'(พัก)' if b in staged else ''}" for b in order)
