@@ -17,13 +17,16 @@ import numpy as np
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_config.json")
 
-COLOR_NAMES = {"g": "เขียว", "r": "แดง", "y": "เหลือง", "b": "ฟ้า"}
+# ข้อความที่ขึ้นบนหน้าต่าง OpenCV ต้องเป็นอังกฤษ (putText วาดภาษาไทยไม่ได้ จะขึ้นเป็น ???)
+COLOR_NAMES = {"g": "green", "r": "red", "y": "yellow", "b": "blue"}
 DRAW_BGR = {"g": (0, 220, 0), "r": (0, 0, 255), "y": (0, 220, 220), "b": (255, 150, 0)}
 
 # ช่วง HSV ตั้งต้น (OpenCV: H 0-179, S/V 0-255) แดงมี 2 ช่วงเพราะ H วนรอบ 0
 DEFAULT_CONFIG = {
+    # เลข index หรือ path ก็ได้ path จาก /dev/v4l/by-id/ จะผูกกับตัวกล้อง ไม่สลับเวลาถอด-เสียบ USB
     "camera_index": 0,
-    "frame": {"cx": 320, "cy": 240, "size": 300},  # กรอบ 3x3 (สี่เหลี่ยมจัตุรัส)
+    "warmup_frames": 25,    # ทิ้งเฟรมแรกๆ ระหว่างที่กล้องปรับแสง (C270 พ่นภาพดำช่วงแรก)
+    "frame": {"cx": 320, "cy": 240, "w": 300, "h": 300},  # กรอบ 3x3 (ปรับกว้าง/สูงแยกกันได้)
     "min_area": 400,        # พื้นที่ต่ำสุดที่นับเป็นบล็อก (พิกเซล)
     "expand_limit": 6,      # ขยาย range ได้กี่ครั้งก่อนจะฟ้อง no color block
     "colors": {
@@ -86,25 +89,26 @@ def color_mask(hsv, spec, grow=0):
 
 
 def grid_rect(cfg):
-    """มุมซ้ายบนและขนาดของกรอบ 3x3"""
+    """มุมซ้ายบน + กว้าง/สูง ของกรอบ 3x3"""
     f = cfg["frame"]
-    half = f["size"] // 2
-    return f["cx"] - half, f["cy"] - half, f["size"]
+    w = f.get("w", f.get("size", 300))
+    h = f.get("h", f.get("size", 300))
+    return f["cx"] - w // 2, f["cy"] - h // 2, w, h
 
 
 def cell_of(cfg, px, py):
     """แปลงพิกัดในภาพเป็นหมายเลขช่อง คืน None ถ้าอยู่นอกกรอบ 3x3 (ตัดทิ้งไม่นับ)"""
-    x0, y0, size = grid_rect(cfg)
-    if not (x0 <= px < x0 + size and y0 <= py < y0 + size):
+    x0, y0, w, h = grid_rect(cfg)
+    if not (x0 <= px < x0 + w and y0 <= py < y0 + h):
         return None
-    col = int((px - x0) * 3 // size)
-    row = int((py - y0) * 3 // size)
+    col = int((px - x0) * 3 // w)
+    row = int((py - y0) * 3 // h)
     return CELL_AT[(row, col)]
 
 
 def find_color(hsv, cfg, color):
     """หาบล็อกของสีหนึ่งให้ได้ 2 ก้อน ขยาย range ทีละขั้นจนกว่าจะเจอ
-    คืน [(ช่อง, พื้นที่), ...] 2 ตัว หรือโยน CameraError"""
+    คืน [(ช่อง, พื้นที่, จุดกึ่งกลาง), ...] 2 ตัว หรือโยน CameraError"""
     spec = cfg["colors"][color]
     name = COLOR_NAMES.get(color, color)
     for grow in range(cfg["expand_limit"] + 1):
@@ -118,45 +122,60 @@ def find_color(hsv, cfg, color):
             m = cv.moments(cnt)
             if m["m00"] == 0:
                 continue
-            cell = cell_of(cfg, m["m10"] / m["m00"], m["m01"] / m["m00"])
+            px, py = m["m10"] / m["m00"], m["m01"] / m["m00"]
+            cell = cell_of(cfg, px, py)
             if cell is None or cell == "c":   # นอกกรอบ / ช่องกลาง -> ตัดทิ้ง
                 continue
             if area > found.get(cell, (0,))[0]:
-                found[cell] = (area, grow)
+                found[cell] = (area, (int(px), int(py)))
         if len(found) > 2:
-            raise CameraError(f"over color block: {color} ({name}) เจอ {len(found)} ก้อน "
-                              f"ที่ช่อง {sorted(found)} (ควรมี 2)")
+            raise CameraError(f"over color block: {color} ({name}) found {len(found)} "
+                              f"at cells {sorted(found)} (need 2)")
         if len(found) == 2:
-            return [(cell, v[0]) for cell, v in found.items()], grow
-    raise CameraError(f"no color block: {color} ({name}) เจอ {len(found)} ก้อน "
-                      f"หลังขยาย range {cfg['expand_limit']} ครั้งแล้ว (ควรมี 2)")
+            return [(cell, area, center) for cell, (area, center) in found.items()], grow
+    raise CameraError(f"no color block: {color} ({name}) found {len(found)} "
+                      f"after {cfg['expand_limit']} range expansions (need 2)")
 
 
-def detect(frame, cfg):
-    """ตรวจทุกสีจากภาพหนึ่งเฟรม คืน {ช่อง: สี} ทั้งหมด 8 ช่อง"""
+def detect(frame, cfg, grown=None, centers=None):
+    """ตรวจทุกสีจากภาพหนึ่งเฟรม คืน {ช่อง: สี} ทั้งหมด 8 ช่อง
+    grown   = dict รับว่าสีไหนต้องขยาย range กี่ขั้น
+    centers = dict รับจุดกึ่งกลางของแต่ละก้อน {ช่อง: (x, y)} ไว้วาดจุดอ้างอิง"""
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
     blocks, areas = {}, {}
     for color in cfg["colors"]:
         cells, grow = find_color(hsv, cfg, color)
-        if grow:
-            print(f"ℹ️ สี {color} ต้องขยาย range {grow} ขั้นถึงจะเจอครบ 2 ก้อน")
-        for cell, area in cells:
+        if grow and grown is not None:
+            grown[color] = grow
+        for cell, area, center in cells:
             if cell in blocks and areas[cell] >= area:
-                raise CameraError(f"ช่อง {cell} เจอทั้งสี {blocks[cell]} และ {color} ซ้อนกัน")
+                raise CameraError(f"cell {cell}: both {blocks[cell]} and {color} detected")
             blocks[cell] = color
             areas[cell] = area
+            if centers is not None:
+                centers[cell] = center
     return blocks
 
 
-def grab_frame(cfg):
-    cam = cv.VideoCapture(cfg["camera_index"])
+def open_camera(cfg):
+    """เปิดกล้องจาก index หรือ path (path ใช้ backend V4L2 ตรงๆ)"""
+    src = cfg["camera_index"]
+    cam = cv.VideoCapture(src, cv.CAP_V4L2) if isinstance(src, str) else cv.VideoCapture(src)
     if not cam.isOpened():
-        raise CameraError(f"เปิดกล้อง index {cfg['camera_index']} ไม่ได้")
+        raise CameraError(f"cannot open camera: {src}")
+    return cam
+
+
+def grab_frame(cfg):
+    cam = open_camera(cfg)
     try:
-        for _ in range(5):        # ทิ้งเฟรมแรกๆ ให้กล้องปรับแสงก่อน
-            ok, frame = cam.read()
-        if not ok:
-            raise CameraError("อ่านภาพจากกล้องไม่ได้")
+        frame = None
+        for _ in range(max(1, cfg.get("warmup_frames", 25))):
+            ok, f = cam.read()          # ทิ้งเฟรมแรกๆ ระหว่างกล้องปรับแสง
+            if ok and f is not None:
+                frame = f
+        if frame is None:
+            raise CameraError("cannot read frame from camera")
         return frame
     finally:
         cam.release()
@@ -165,29 +184,47 @@ def grab_frame(cfg):
 def get_blocks():
     """API หลักที่ main_0.7 เรียกใช้ คืน {ช่อง: สี} ในมุมมองภาพกล้อง"""
     cfg = load_config()
-    return detect(grab_frame(cfg), cfg)
+    grown = {}
+    blocks = detect(grab_frame(cfg), cfg, grown)
+    if grown:
+        print("ℹ️ ต้องขยาย range: " + ", ".join(f"{c}+{n}" for c, n in grown.items()))
+    return blocks
 
 
 # ==========================================
 # 🖥️ UI ตั้งกรอบ 3x3 (รันไฟล์นี้ตรงๆ)
 # ==========================================
-HELP = ["w/a/s/d = เลื่อนกรอบ", "+/- = ซูมกรอบเข้า/ออก", "[ / ] = min_area",
-        "m = สลับดูมาสก์รายสี", "k = บันทึกค่า", "q = ออก"]
+HELP = ["w/a/s/d = move grid", "+/- (or z/x) = zoom grid", "t/g = taller/shorter",
+        "f/h = wider/narrower", "[ / ] = min_area", "m = mask view", "k = SAVE", "q = quit"]
 
 
-def draw_overlay(frame, cfg, blocks, note):
-    x0, y0, size = grid_rect(cfg)
-    step = size // 3
-    cv.rectangle(frame, (x0, y0), (x0 + size, y0 + size), (255, 255, 255), 2)
+def draw_overlay(frame, cfg, blocks, note, centers=None):
+    x0, y0, w, h = grid_rect(cfg)
+    sx, sy = w // 3, h // 3
+    cv.rectangle(frame, (x0, y0), (x0 + w, y0 + h), (255, 255, 255), 2)
     for i in (1, 2):
-        cv.line(frame, (x0 + i * step, y0), (x0 + i * step, y0 + size), (255, 255, 255), 1)
-        cv.line(frame, (x0, y0 + i * step), (x0 + size, y0 + i * step), (255, 255, 255), 1)
+        cv.line(frame, (x0 + i * sx, y0), (x0 + i * sx, y0 + h), (255, 255, 255), 1)
+        cv.line(frame, (x0, y0 + i * sy), (x0 + w, y0 + i * sy), (255, 255, 255), 1)
     for (row, col), cell in CELL_AT.items():
-        cx, cy = x0 + col * step + 6, y0 + row * step + 20
         color = blocks.get(cell)
-        label = f"{cell}:{color}" if color else str(cell)
-        cv.putText(frame, label, (cx, cy), cv.FONT_HERSHEY_SIMPLEX, 0.6,
-                   DRAW_BGR.get(color, (200, 200, 200)), 2)
+        bgr = DRAW_BGR.get(color, (200, 200, 200))
+        # มุมซ้ายบนของช่อง: เลขช่อง
+        cv.putText(frame, str(cell), (x0 + col * sx + 6, y0 + row * sy + 20),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        # มุมขวาล่างของช่อง: สีที่คิดว่าอยู่ในช่องนี้ (ตัวอักษร + สี่เหลี่ยมสีนั้น)
+        bx, by = x0 + (col + 1) * sx - 10, y0 + (row + 1) * sy - 10
+        if color:
+            cv.rectangle(frame, (bx - 26, by - 16), (bx - 10, by), bgr, -1)
+            cv.rectangle(frame, (bx - 26, by - 16), (bx - 10, by), (255, 255, 255), 1)
+            cv.putText(frame, color, (bx - 8, by), cv.FONT_HERSHEY_SIMPLEX, 0.6, bgr, 2)
+        else:
+            cv.putText(frame, "-", (bx - 8, by), cv.FONT_HERSHEY_SIMPLEX, 0.6, (120, 120, 120), 2)
+    # จุดอ้างอิงกึ่งกลางของแต่ละก้อนที่เจอ
+    for cell, (px, py) in (centers or {}).items():
+        bgr = DRAW_BGR.get(blocks.get(cell), (255, 255, 255))
+        cv.drawMarker(frame, (px, py), (255, 255, 255), cv.MARKER_CROSS, 14, 3)
+        cv.circle(frame, (px, py), 5, bgr, -1)
+        cv.circle(frame, (px, py), 5, (255, 255, 255), 1)
     for i, line in enumerate(HELP):
         cv.putText(frame, line, (10, 20 + 18 * i), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     cv.putText(frame, note, (10, frame.shape[0] - 12), cv.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -197,23 +234,27 @@ def draw_overlay(frame, cfg, blocks, note):
 
 def setup():
     cfg = load_config()
-    cam = cv.VideoCapture(cfg["camera_index"])
-    if not cam.isOpened():
-        print(f"❌ เปิดกล้อง index {cfg['camera_index']} ไม่ได้")
+    try:
+        cam = open_camera(cfg)
+    except CameraError as e:
+        print(f"❌ {e}")
         return
     mask_view = None      # None = ภาพปกติ, หรือชื่อสีเพื่อดูมาสก์
     colors = list(cfg["colors"])
-    print("🖥️ ตั้งกรอบให้ตรงกับตาราง 3x3 แล้วกด k เพื่อบันทึก (q = ออก)")
+    print("🖥️ จัดกรอบให้ตรงกับตาราง 3x3 แล้วกด k เพื่อบันทึก (q = ออก) — ข้อความบนหน้าต่างเป็นอังกฤษ")
     while True:
         ok, frame = cam.read()
         if not ok:
             print("❌ อ่านภาพจากกล้องไม่ได้")
             break
+        grown, centers = {}, {}
         try:
-            blocks = detect(frame, cfg)
+            blocks = detect(frame, cfg, grown, centers)
             note = "OK: " + " ".join(f"{c}={blocks[c]}" for c in sorted(blocks))
+            if grown:
+                note += "  | ขยาย range: " + " ".join(f"{c}+{n}" for c, n in grown.items())
         except CameraError as e:
-            blocks, note = {}, str(e)
+            blocks, centers, note = {}, {}, str(e)
 
         if mask_view:
             hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
@@ -221,10 +262,12 @@ def setup():
             note = f"[mask {mask_view}] " + note
         else:
             view = frame.copy()
-        cv.imshow("camara setup (3x3)", draw_overlay(view, cfg, blocks, note))
+        cv.imshow("camara setup (3x3)", draw_overlay(view, cfg, blocks, note, centers))
 
         key = cv.waitKey(30) & 0xFF
         f = cfg["frame"]
+        f.setdefault("w", f.get("size", 300))
+        f.setdefault("h", f.get("size", 300))
         if key in (ord("q"), 27):
             break
         elif key == ord("w"):
@@ -235,10 +278,18 @@ def setup():
             f["cx"] -= 5
         elif key == ord("d"):
             f["cx"] += 5
-        elif key in (ord("+"), ord("=")):
-            f["size"] += 6
-        elif key in (ord("-"), ord("_")):
-            f["size"] = max(30, f["size"] - 6)
+        elif key in (ord("+"), ord("="), ord("z")):      # ซูมเข้า (กรอบใหญ่ขึ้น)
+            f["w"], f["h"] = f["w"] + 6, f["h"] + 6
+        elif key in (ord("-"), ord("_"), ord("x")):      # ซูมออก (กรอบเล็กลง)
+            f["w"], f["h"] = max(30, f["w"] - 6), max(30, f["h"] - 6)
+        elif key == ord("t"):
+            f["h"] += 6
+        elif key == ord("g"):
+            f["h"] = max(30, f["h"] - 6)
+        elif key == ord("f"):
+            f["w"] += 6
+        elif key == ord("h"):
+            f["w"] = max(30, f["w"] - 6)
         elif key == ord("["):
             cfg["min_area"] = max(50, cfg["min_area"] - 50)
         elif key == ord("]"):
