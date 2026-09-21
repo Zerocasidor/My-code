@@ -16,7 +16,7 @@ DEFAULT_SETTINGS = {
     "ground_z": None,
     "grip_offset": 0.0,
     "order": [1, 2, 3, 4],
-    "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_bot")},
+    "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_last")},
 }
 
 SUCK_DELAY_MS = 50      # รอหัวดูดจับบล็อก
@@ -169,8 +169,8 @@ def build_grid(positions):
 
 
 def build_temps(positions):
-    """คำนวณจุดพัก 4 ช่อง จากช่องบนสุด (temp_top) ถึงช่องล่างสุด (temp_bot)"""
-    a, b = positions.get("temp_top"), positions.get("temp_bot")
+    """คำนวณจุดพัก 4 ช่อง จากช่องบนสุด (temp_top) ถึงช่องล่างสุด (temp_last)"""
+    a, b = positions.get("temp_top"), positions.get("temp_last")
     if not (a and b):
         return None
     return {i: point(lerp(a["x"], b["x"], (i - 1) / 3), lerp(a["y"], b["y"], (i - 1) / 3))
@@ -210,7 +210,7 @@ def show_layout(settings):
         for i in range(1, 5):
             print(f"   temp_{i}: ({temps[i]['x']:7.2f},{temps[i]['y']:7.2f}) r={temps[i]['r']:6.2f}")
     else:
-        print("⚠️ ยังไม่ได้สอนจุดพัก (temp_top / temp_bot)")
+        print("⚠️ ยังไม่ได้สอนจุดพัก (temp_top / temp_last)")
 
 
 # ==========================================
@@ -281,7 +281,7 @@ TEACH_STEPS = [
     ("grid_1", "บล็อกช่อง 1 (บนซ้าย) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
     ("grid_8", "ช่อง 8 (ล่างขวา) — วางหัวดูดแตะ 'พื้น'"),
     ("temp_top", "จุดพักช่องบนสุด (temp_1) — แตะ 'พื้น'"),
-    ("temp_bot", "จุดพักช่องล่างสุด (temp_4) — แตะ 'พื้น'"),
+    ("temp_last", "จุดพักช่องล่างสุด (temp_4) — แตะ 'พื้น'"),
 ]
 
 
