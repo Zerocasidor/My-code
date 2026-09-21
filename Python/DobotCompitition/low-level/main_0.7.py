@@ -169,7 +169,7 @@ def safe_z_for(base, block_h, tower_height, carrying=True):
 
 
 # ==========================================
-# 📐 คำนวณพิกัดจากจุดที่สอนไว้ 4 จุด
+# 📐 คำนวณพิกัดจากมุมกริดที่สอนไว้
 # ==========================================
 def point(x, y):
     """มุมหมุน r = atan2(y, x) เสมอ (ตรงกับค่าที่สอนไว้ทุกจุดในเวอร์ชันก่อน)"""
@@ -183,6 +183,7 @@ def lerp(a, b, t):
 
 REQUIRED_CORNERS = ("grid_1", "grid_3", "grid_8")   # บนซ้าย, บนขวา, ล่างขวา
 OPTIONAL_CORNER = "grid_6"                          # ล่างซ้าย (ใส่เพิ่มเพื่อความแม่นยำ)
+GRID_CORNERS = REQUIRED_CORNERS + (OPTIONAL_CORNER,)
 
 
 def build_grid(positions):
@@ -490,21 +491,24 @@ def run_operation(device, settings):
 
 
 # ==========================================
-# 🎮 TEACH (4 จุด)
+# 🎮 TEACH (6 จุด)
 # ==========================================
+# มุมกริดทั้ง 4 สอนที่ "ผิวบนของบล็อก" เหมือนกันหมด (วางบล็อกไว้ที่ช่อง 1, 3, 6, 8 ก่อนสอน)
+# ระดับพื้น (ground) เอามาจากจุดพัก 2 จุด ซึ่งเป็นพื้นที่ว่างจึงแตะพื้นได้จริง
 TEACH_STEPS = [
     ("grid_1", "บล็อกช่อง 1 (บนซ้าย) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
-    ("grid_3", "ช่อง 3 (บนขวา) — วางหัวดูดแตะ 'พื้น'"),
-    ("grid_8", "ช่อง 8 (ล่างขวา) — วางหัวดูดแตะ 'พื้น'"),
-    ("grid_6", "[ไม่บังคับ] ช่อง 6 (ล่างซ้าย) — แตะ 'พื้น' (กด s ข้ามได้ ใส่แล้วแม่นขึ้น)"),
-    ("temp_top", "จุดพักช่องบนสุด (temp_1) — แตะ 'พื้น'"),
-    ("temp_last", "จุดพักช่องล่างสุด (temp_4) — แตะ 'พื้น'"),
+    ("grid_3", "บล็อกช่อง 3 (บนขวา) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
+    ("grid_8", "บล็อกช่อง 8 (ล่างขวา) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
+    ("grid_6", "บล็อกช่อง 6 (ล่างซ้าย) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
+    ("temp_top", "จุดพักช่องบนสุด (temp_1) — วางหัวดูดแตะ 'พื้น'"),
+    ("temp_last", "จุดพักช่องล่างสุด (temp_4) — วางหัวดูดแตะ 'พื้น'"),
 ]
 
 
 def teach_mode(device, settings):
     positions = settings["positions"]
-    print("\n🎮 Teach 4 จุด (ที่เหลือคำนวณให้เอง) | [Enter]=บันทึกจุดนี้ | s=ข้าม | q=ออก")
+    print("\n🎮 Teach 6 จุด: มุมกริด 4 จุด (ผิวบนบล็อก) + จุดพัก 2 จุด (พื้น) ที่เหลือคำนวณให้เอง")
+    print("   [Enter]=บันทึกจุดนี้ | s=ข้าม | q=ออก")
     for key, label in TEACH_STEPS:
         old = positions.get(key)
         note = f" [เดิม: ({old['x']}, {old['y']})]" if old else ""
@@ -518,14 +522,19 @@ def teach_mode(device, settings):
                           "z": round(p.z, 2), "r": round(p.r, 2)}
         print(f"✅ {key}: {positions[key]}")
 
-    # ช่อง 8 สอนที่พื้น -> ใช้เป็น Ground Z ได้เลย
-    g8, g1 = positions.get("grid_8"), positions.get("grid_1")
-    if g8:
-        settings["ground_z"] = g8["z"]
-        print(f"📏 ตั้ง Ground Z = {g8['z']:.2f} mm (จากช่อง 8)")
-        if g1:
-            print(f"   ความสูงบล็อกที่วัดได้จากช่อง 1 - ช่อง 8 = {g1['z'] - g8['z']:.2f} mm "
+    # จุดพักสอนที่พื้น -> ใช้หาระดับพื้น (เฉลี่ย 2 จุดกันพื้นเอียง)
+    t1, t4 = positions.get("temp_top"), positions.get("temp_last")
+    if t1 and t4:
+        settings["ground_z"] = round((t1["z"] + t4["z"]) / 2, 2)
+        print(f"📏 ตั้ง Ground Z = {settings['ground_z']:.2f} mm "
+              f"(เฉลี่ยจากจุดพัก {t1['z']:.2f} / {t4['z']:.2f})")
+        tops = [positions[k]["z"] for k in GRID_CORNERS if positions.get(k)]
+        if tops:
+            measured = sum(tops) / len(tops) - settings["ground_z"]
+            print(f"   ความสูงบล็อกที่วัดได้ (ผิวบนเฉลี่ย {len(tops)} มุม - พื้น) = {measured:.2f} mm "
                   f"(ค่าที่ใช้อยู่ {settings['block_height']:.2f} mm)")
+    else:
+        print("⚠️ ยังไม่ได้สอนจุดพักครบ 2 จุด จึงยังไม่ได้ตั้ง Ground — ใช้ [3] SetGround แทนได้")
     show_layout(settings)
 
 
@@ -540,7 +549,7 @@ def toggle_temp(settings):
 
 
 def reset_positions(settings):
-    """ล้างพิกัดที่สอนไว้ทั้งหมด (grid_1, grid_8, temp_top, temp_last) เพื่อเริ่มสอนใหม่
+    """ล้างพิกัดที่สอนไว้ทั้งหมด (มุมกริด 4 จุด + จุดพัก 2 จุด) เพื่อเริ่มสอนใหม่
     ค่าอื่น เช่น ground_z / ความเร็ว ไม่ถูกแตะ"""
     filled = [k for k, v in settings["positions"].items() if v]
     if not filled:
