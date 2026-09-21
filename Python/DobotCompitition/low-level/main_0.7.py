@@ -1,8 +1,11 @@
 import os
+import re
+import glob
 import json
 import time
 import math
 import struct
+import importlib.util
 from pydobot import Dobot
 from pydobot.message import Message
 
@@ -26,6 +29,11 @@ RELEASE_DELAY_MS = 100  # รอหัวดูดปล่อยบล็อก
 GRID_LAYOUT = {1: (0, 0), 2: (0, 1), 3: (0, 2),
                4: (1, 0), "c": (1, 1), 5: (1, 2),
                6: (2, 0), 7: (2, 1), 8: (2, 2)}
+
+# ฝั่งกล้อง: ไฟล์ camara_x.x.py เวอร์ชันล่าสุดในโฟลเดอร์ high-level
+CAMERA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "high-level")
+# ชื่อฟังก์ชันที่จะเรียกหาในไฟล์กล้อง (ตัวแรกที่เจอจะถูกใช้) ต้องคืนลำดับบล็อก 4 ตัว เช่น [3, 5, 8, 2]
+CAMERA_FUNCS = ("get_order", "get_block_order", "detect_order")
 
 
 def load_settings():
@@ -177,20 +185,76 @@ def build_temps(positions):
             for i in range(1, 5)}
 
 
+def valid_order(order):
+    """ลำดับที่ใช้ได้: เลข 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน"""
+    try:
+        order = [int(b) for b in order]
+    except (TypeError, ValueError):
+        return None
+    if len(order) != 4 or len(set(order)) != 4 or any(b < 1 or b > 8 for b in order):
+        return None
+    return order
+
+
+def latest_camera_file():
+    """ไฟล์ camara_x.x.py เวอร์ชันสูงสุดใน high-level"""
+    def version(path):
+        m = re.search(r"camara_(\d+)\.(\d+)", os.path.basename(path))
+        return (int(m.group(1)), int(m.group(2))) if m else (-1, -1)
+
+    files = [f for f in glob.glob(os.path.join(CAMERA_DIR, "camara_*.py")) if version(f) != (-1, -1)]
+    return max(files, key=version) if files else None
+
+
+def order_from_camera():
+    """ขอลำดับบล็อกจากไฟล์กล้องเวอร์ชันล่าสุด คืน None ถ้าใช้ไม่ได้ (ให้ไปกรอกเอง)"""
+    path = latest_camera_file()
+    if not path:
+        print(f"📷 ไม่พบไฟล์ camara_*.py ใน {CAMERA_DIR}")
+        return None
+    name = os.path.basename(path)
+    try:
+        spec = importlib.util.spec_from_file_location("camara_latest", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as e:
+        print(f"📷 โหลด {name} ไม่ได้ ({e})")
+        return None
+
+    fn = next((getattr(module, n) for n in CAMERA_FUNCS if callable(getattr(module, n, None))), None)
+    if fn is None:
+        print(f"📷 {name} ไม่มีฟังก์ชัน {' / '.join(CAMERA_FUNCS)} ที่คืนลำดับบล็อก")
+        return None
+    try:
+        order = valid_order(fn())
+    except Exception as e:
+        print(f"📷 {name} ทำงานผิดพลาด ({e})")
+        return None
+    if not order:
+        print(f"📷 {name} คืนค่าที่ใช้ไม่ได้ (ต้องเป็นเลข 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน)")
+        return None
+    print(f"📷 ได้ลำดับจาก {name}: {' '.join(str(b) for b in order)}")
+    return order
+
+
 def ask_order(settings):
-    """เลือกลำดับบล็อก 4 ตัวจากทั้งหมด 8 ตัว"""
+    """กรอกลำดับบล็อกเอง 4 ตัวจากทั้งหมด 8 ตัว"""
     cur = " ".join(str(b) for b in settings.get("order", []))
     raw = input(f"เลือกลำดับบล็อก 4 ตัว (1-8) เช่น '3 5 8 2' [{cur}] (Enter=ค่าเดิม): ").strip()
-    if not raw:
-        raw = cur
-    try:
-        order = [int(t) for t in raw.replace(",", " ").split()]
-    except ValueError:
-        order = []
-    if len(order) != 4 or len(set(order)) != 4 or any(b < 1 or b > 8 for b in order):
+    order = valid_order((raw or cur).replace(",", " ").split())
+    if not order:
         print("❌ ต้องเป็นเลข 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน")
         return None
-    settings["order"] = order
+    return order
+
+
+def get_order(settings, use_camera=True):
+    """ใช้ลำดับจากกล้องก่อน ถ้าไม่ได้ค่อยให้กรอกเอง"""
+    order = order_from_camera() if use_camera else None
+    if not order:
+        order = ask_order(settings)
+    if order:
+        settings["order"] = order
     return order
 
 
@@ -216,7 +280,7 @@ def show_layout(settings):
 # ==========================================
 # 🚀 RUN
 # ==========================================
-def run_operation(device, settings):
+def run_operation(device, settings, use_camera=True):
     positions = settings["positions"]
     grid = build_grid(positions)
     temps = build_temps(positions)
@@ -228,7 +292,7 @@ def run_operation(device, settings):
         print("❌ ยังไม่ได้ตั้ง Ground ใช้ [3] SetGround ก่อน")
         return
 
-    order = ask_order(settings)
+    order = get_order(settings, use_camera=use_camera)
     if not order:
         return
 
@@ -332,9 +396,12 @@ def main():
     try:
         while True:
             choice = input(
-                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout [Enter]Exit > ").strip()
+                "\n[1]Run(กล้อง) [2]Teach&Save [3]SetGround [4]Save&Exit "
+                "[5]ShowLayout [6]Run(กรอกเอง) [Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
+            elif choice == "6":
+                run_operation(device, settings, use_camera=False)
             elif choice == "2":
                 teach_mode(device, settings)
             elif choice == "3":
