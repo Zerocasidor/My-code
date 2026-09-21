@@ -20,7 +20,8 @@ DEFAULT_SETTINGS = {
     # true = ลำดับที่ 3-4 แวะพักที่ temp ก่อน / false = หยิบจากช่องเดิมไปวาง Tower ตรงๆ
     "use_temp": True,
     "order": [1, 2, 3, 4],
-    "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_last")},
+    "positions": {k: None for k in ("grid_1", "grid_3", "grid_8", "grid_6",
+                                    "temp_top", "temp_last")},
 }
 
 SUCK_DELAY_MS = 50      # รอหัวดูดจับบล็อก
@@ -165,14 +166,46 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
+REQUIRED_CORNERS = ("grid_1", "grid_3", "grid_8")   # บนซ้าย, บนขวา, ล่างขวา
+OPTIONAL_CORNER = "grid_6"                          # ล่างซ้าย (ใส่เพิ่มเพื่อความแม่นยำ)
+
+
 def build_grid(positions):
-    """คำนวณ 9 ช่องจากมุมบนซ้าย (บล็อก 1) และมุมล่างขวา (ตำแหน่ง 8)
-    สมมติว่าแถว (บน->ล่าง) ไล่ไปตามแกน X และคอลัมน์ (ซ้าย->ขวา) ไล่ไปตามแกน Y ของหุ่นยนต์"""
-    p1, p8 = positions.get("grid_1"), positions.get("grid_8")
-    if not (p1 and p8):
+    """คำนวณ 9 ช่องด้วยเวกเตอร์ 2 ทิศ (affine): ตำแหน่ง = จุดเริ่ม + คอลัมน์*u + แถว*v
+    จึงรองรับตารางที่วางเอียงจากแกน X/Y ของหุ่นยนต์ได้
+
+    - 3 มุม (grid_1, grid_3, grid_8): คำนวณตรงๆ ผ่านทั้งสามจุดพอดี
+    - 4 มุม (มี grid_6 ด้วย): ใช้ least-squares เฉลี่ยความคลาดจากการสอนทั้งสี่มุม
+      (มุมทั้งสี่อยู่ที่ (แถว,คอลัมน์) = (0,0),(0,2),(2,0),(2,2) เป็นดีไซน์สมดุล จึงมีสูตรปิด)"""
+    p1, p3, p8 = (positions.get(k) for k in REQUIRED_CORNERS)
+    if not (p1 and p3 and p8):
         return None
-    return {name: point(lerp(p1["x"], p8["x"], row / 2), lerp(p1["y"], p8["y"], col / 2))
+    p6 = positions.get(OPTIONAL_CORNER)
+    if p6:
+        corners = (p1, p3, p6, p8)
+        ux, uy = (((p3[c] + p8[c]) - (p1[c] + p6[c])) / 4 for c in "xy")
+        vx, vy = (((p6[c] + p8[c]) - (p1[c] + p3[c])) / 4 for c in "xy")
+        ox = sum(p["x"] for p in corners) / 4 - ux - vx
+        oy = sum(p["y"] for p in corners) / 4 - uy - vy
+    else:
+        ox, oy = p1["x"], p1["y"]
+        ux, uy = ((p3[c] - p1[c]) / 2 for c in "xy")
+        vx, vy = ((p8[c] - p3[c]) / 2 for c in "xy")
+    return {name: point(ox + col * ux + row * vx, oy + col * uy + row * vy)
             for name, (row, col) in GRID_LAYOUT.items()}
+
+
+def warn_missing_grid(positions):
+    """บอกให้ชัดว่าขาดมุมไหน และถ้าเป็นค่าเก่าแบบ 2 จุดก็บอกว่าต้องสอนใหม่"""
+    missing = [k for k in REQUIRED_CORNERS if not positions.get(k)]
+    old_style = (positions.get("grid_1") and positions.get("grid_8")
+                 and not positions.get("grid_3") and not positions.get(OPTIONAL_CORNER))
+    if old_style:
+        print("❌ ค่าที่สอนไว้เป็นแบบเก่า (2 มุม) ใช้กับการคำนวณแบบใหม่ไม่ได้")
+        print("   ตอนนี้ต้องสอน 3 มุม: grid_1 (บนซ้าย), grid_3 (บนขวา), grid_8 (ล่างขวา)")
+        print("   กด [6] ResetPositions แล้ว [2] Teach ใหม่")
+    else:
+        print(f"❌ ยังสอนมุมกริดไม่ครบ ขาด: {', '.join(missing)} — ใช้ [2] Teach ก่อน")
 
 
 def build_temps(positions):
@@ -238,9 +271,10 @@ def show_layout(settings, device=None):
     grid = build_grid(settings["positions"])
     temps = build_temps(settings["positions"])
     if not grid:
-        print("❌ ยังไม่ได้สอนมุมกริด (ใช้ [2] Teach)")
+        warn_missing_grid(settings["positions"])
         return
-    print("\n📋 กริด 3x3 (ซ้าย->ขวา, บน->ล่าง):")
+    mode = "4 มุม (least-squares)" if settings["positions"].get(OPTIONAL_CORNER) else "3 มุม"
+    print(f"\n📋 กริด 3x3 (ซ้าย->ขวา, บน->ล่าง) — คำนวณจาก {mode}:")
     for row in ([1, 2, 3], [4, "c", 5], [6, 7, 8]):
         print("   " + " | ".join(
             f"{n}: ({grid[n]['x']:7.2f},{grid[n]['y']:7.2f}) r={grid[n]['r']:6.2f}" for n in row))
@@ -263,9 +297,11 @@ def run_operation(device, settings):
     grid = build_grid(positions)
     temps = build_temps(positions)
     use_temp = settings.get("use_temp", True)
-    if not grid or (use_temp and not temps):
-        print("❌ ยังสอนตำแหน่งไม่ครบ กรุณาใช้ [2] Teach ก่อน"
-              + ("" if use_temp else " (โหมดปิด temp ต้องมีอย่างน้อย grid_1 กับ grid_8)"))
+    if not grid:
+        warn_missing_grid(positions)
+        return
+    if use_temp and not temps:
+        print("❌ ยังไม่ได้สอนจุดพัก (temp_top / temp_last) — ใช้ [2] Teach หรือปิด temp ที่เมนู [7]")
         return
     ground_z = settings.get("ground_z")
     if ground_z is None:
@@ -330,7 +366,9 @@ def run_operation(device, settings):
 # ==========================================
 TEACH_STEPS = [
     ("grid_1", "บล็อกช่อง 1 (บนซ้าย) — วางหัวดูดบน 'ผิวบนของบล็อก'"),
+    ("grid_3", "ช่อง 3 (บนขวา) — วางหัวดูดแตะ 'พื้น'"),
     ("grid_8", "ช่อง 8 (ล่างขวา) — วางหัวดูดแตะ 'พื้น'"),
+    ("grid_6", "[ไม่บังคับ] ช่อง 6 (ล่างซ้าย) — แตะ 'พื้น' (กด s ข้ามได้ ใส่แล้วแม่นขึ้น)"),
     ("temp_top", "จุดพักช่องบนสุด (temp_1) — แตะ 'พื้น'"),
     ("temp_last", "จุดพักช่องล่างสุด (temp_4) — แตะ 'พื้น'"),
 ]
