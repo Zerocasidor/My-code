@@ -48,28 +48,8 @@ DEFAULT_COLORS = {
 
 COLOR_NAMES = ["Green", "Blue", "Yellow", "Red"]
 MORPH_KERNEL = cv.getStructuringElement(cv.MORPH_RECT, (5, 5))
-
-MAIN_WINDOW = "Dobot Vision System v0.3"
 TUNER_WINDOW = "HSV Color Tuner (Press 's' to save)"
-MASK_WINDOW = "Active Color Diagnostic (Mask + Cutout)"
-
-# Global state for interactive mouse inspection
-sampled_point = None
-sampled_hsv = None
-
-
-# ==============================================================================
-# Mouse Callback for Pixel Inspection
-# ==============================================================================
-def on_mouse_click(event, x, y, flags, param):
-    """Allow user to click on any object to inspect its exact HSV values."""
-    global sampled_point, sampled_hsv
-    if event == cv.EVENT_LBUTTONDOWN:
-        hsv_frame = param
-        if hsv_frame is not None and 0 <= y < hsv_frame.shape[0] and 0 <= x < hsv_frame.shape[1]:
-            sampled_point = (x, y)
-            sampled_hsv = [int(v) for v in hsv_frame[y, x]]
-            print(f"📍 Clicked at ({x}, {y}) -> HSV: H={sampled_hsv[0]}, S={sampled_hsv[1]}, V={sampled_hsv[2]}")
+MASK_WINDOW = "Active Color Mask"
 
 
 # ==============================================================================
@@ -167,13 +147,13 @@ def calculate_orientation(contour):
         theta -= 180.0
 
     box = cv.boxPoints(rect)
-    # NumPy 2.0+ compatible int32 cast
+    # Compatible with NumPy 2.0+ (np.int0 is deprecated/removed in NumPy 2.0)
     box = np.int32(box)
     return int(cx), int(cy), theta, box
 
 
 # ==============================================================================
-# Interactive HSV Tuner Window & Dashboard
+# Interactive HSV Tuner Window (Smooth Trackbars without flickering)
 # ==============================================================================
 def nothing(x):
     pass
@@ -181,7 +161,7 @@ def nothing(x):
 
 def setup_tuner_window(color_config, active_color_idx):
     cv.namedWindow(TUNER_WINDOW, cv.WINDOW_NORMAL)
-    cv.resizeWindow(TUNER_WINDOW, 520, 480)
+    cv.resizeWindow(TUNER_WINDOW, 480, 420)
 
     cv.createTrackbar("Color (0:G, 1:B, 2:Y, 3:R)", TUNER_WINDOW, active_color_idx, len(COLOR_NAMES) - 1, nothing)
     cv.createTrackbar("H Min / H1 Max", TUNER_WINDOW, 0, 180, nothing)
@@ -233,94 +213,10 @@ def update_config_from_trackbars(color_config, active_color_idx):
     return max(min_area, 50)
 
 
-def draw_tuner_dashboard(color_config, active_color_idx, min_area):
-    """Render a visual context panel with colors, values, and instructions inside the tuner window."""
-    panel = np.zeros((190, 520, 3), dtype=np.uint8)
-    panel[:] = (30, 30, 30)  # Dark gray background
-
-    cname = COLOR_NAMES[active_color_idx]
-    cfg = color_config[cname]
-    bgr = tuple(int(x) for x in cfg["bgr"])
-
-    # Header with active color swatch
-    cv.rectangle(panel, (10, 10), (510, 48), (45, 45, 45), -1)
-    cv.circle(panel, (30, 29), 12, bgr, -1)
-    cv.circle(panel, (30, 29), 13, (255, 255, 255), 1)
-    cv.putText(panel, f"TUNING COLOR: {cname.upper()}", (55, 36), cv.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-    cv.putText(panel, f"[Press 1-4 to switch]", (345, 35), cv.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-
-    # Current Threshold Values
-    if cname == "Red":
-        h_str = f"H1: [0..{cfg['h_max1']}], H2: [{cfg['h_min2']}..180]"
-    else:
-        h_str = f"Hue: [{cfg['h_min']}..{cfg['h_max']}]"
-    sv_str = f"Sat: [{cfg['s_min']}..{cfg['s_max']}] | Val: [{cfg['v_min']}..{cfg['v_max']}]"
-    cv.putText(panel, h_str, (20, 78), cv.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
-    cv.putText(panel, sv_str, (20, 104), cv.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
-    cv.putText(panel, f"Min Area: {min_area} px", (340, 78), cv.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
-
-    # Clicked Pixel Inspector Info
-    if sampled_hsv is not None and sampled_point is not None:
-        samp_txt = f"Clicked Pixel ({sampled_point[0]},{sampled_point[1]}): H={sampled_hsv[0]}, S={sampled_hsv[1]}, V={sampled_hsv[2]}"
-        cv.putText(panel, samp_txt, (20, 138), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-    else:
-        cv.putText(panel, "Tip: Click any object in camera window to inspect its HSV", (20, 138), cv.FONT_HERSHEY_SIMPLEX, 0.45, (140, 140, 140), 1)
-
-    # Footer instructions
-    cv.putText(panel, "Hotkeys: 's' = Save Config | 't' = Toggle Tuner | 'q' = Exit", (20, 172), cv.FONT_HERSHEY_SIMPLEX, 0.45, (100, 255, 100), 1)
-
-    cv.imshow(TUNER_WINDOW, panel)
-
-
-def draw_diagnostic_mask_window(frame, mask, color_name, bgr, obj_count):
-    """
-    Render a clear, side-by-side diagnostic window:
-    Left: Binary Mask (Black/White)
-    Right: Color Cutout (actual colored pixels extracted from camera)
-    Top Banner: Context info on current detection status
-    """
-    h, w = mask.shape
-    preview_w = 320
-    preview_h = 240
-
-    # Resize for comfortable side-by-side viewing
-    mask_small = cv.resize(mask, (preview_w, preview_h))
-    mask_bgr = cv.cvtColor(mask_small, cv.COLOR_GRAY2BGR)
-
-    # Generate color cutout (bitwise AND)
-    frame_small = cv.resize(frame, (preview_w, preview_h))
-    cutout = cv.bitwise_and(frame_small, frame_small, mask=mask_small)
-
-    # Combine side-by-side
-    combined = np.hstack([mask_bgr, cutout])
-
-    # Top banner with context
-    banner = np.zeros((55, preview_w * 2, 3), dtype=np.uint8)
-    banner[:] = (35, 35, 35)
-
-    non_zero = np.count_nonzero(mask)
-    pct = (non_zero / (w * h)) * 100.0
-
-    banner_title = f"Diagnostic: [{color_name.upper()}]  |  Matching Pixels: {non_zero} ({pct:.1f}%)  |  Objects Found: {obj_count}"
-    cv.putText(banner, banner_title, (12, 24), cv.FONT_HERSHEY_SIMPLEX, 0.52, bgr, 2)
-
-    if obj_count == 0:
-        hint_text = f"No {color_name} detected. Move object into frame or lower S/V Min sliders."
-        cv.putText(banner, hint_text, (12, 45), cv.FONT_HERSHEY_SIMPLEX, 0.42, (0, 165, 255), 1)
-    else:
-        hint_text = f"Target isolated! Adjust sliders until object silhouette is clean and solid."
-        cv.putText(banner, hint_text, (12, 45), cv.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1)
-
-    full_view = np.vstack([banner, combined])
-    cv.imshow(MASK_WINDOW, full_view)
-
-
 # ==============================================================================
 # Main Execution Loop
 # ==============================================================================
 def main():
-    global sampled_hsv, sampled_point
-
     color_config = load_color_config()
     H_matrix = load_calibration_matrix()
 
@@ -333,8 +229,6 @@ def main():
     cap.set(cv.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
-    cv.namedWindow(MAIN_WINDOW, cv.WINDOW_NORMAL)
-
     tuner_mode = "--tune" in sys.argv
     active_color_idx = 0
     if tuner_mode:
@@ -343,15 +237,13 @@ def main():
     min_contour_area = DEFAULT_MIN_AREA
     last_log_time = 0.0
 
-    print("\n" + "=" * 68)
-    print("🤖 dobotImg_0.3 - Dobot Vision & Color Tracking System")
+    print("\n" + "=" * 65)
+    print("🤖 camara_0.2 - Dobot Vision & Color Tracking System")
     print("Controls:")
-    print("  't'         : Toggle Live HSV Tuner Window & Diagnostic View")
-    print("  '1', '2', '3', '4' : Switch Tuner directly to Green, Blue, Yellow, Red")
-    print("  's'         : Save current tuned HSV thresholds to color_config.json")
-    print("  Left Click  : Click any object in camera to inspect its HSV values")
-    print("  'q' or ESC  : Exit")
-    print("=" * 68 + "\n")
+    print("  't' : Toggle Live HSV Tuner Window")
+    print("  's' : Save current tuned HSV thresholds to JSON")
+    print("  'q' or ESC : Exit")
+    print("=" * 65 + "\n")
 
     try:
         while True:
@@ -359,12 +251,6 @@ def main():
             if not ret or frame is None:
                 print("❌ Stream ended or frame lost.")
                 break
-
-            blurred = cv.GaussianBlur(frame, (5, 5), 0)
-            hsv = cv.cvtColor(blurred, cv.COLOR_BGR2HSV)
-
-            # Set mouse callback so clicks inspect HSV on this frame
-            cv.setMouseCallback(MAIN_WINDOW, on_mouse_click, hsv)
 
             # Handle tuner window updates
             if tuner_mode:
@@ -374,22 +260,21 @@ def main():
                     sync_trackbars_to_color(color_config, active_color_idx)
                 min_contour_area = update_config_from_trackbars(color_config, active_color_idx)
 
+            blurred = cv.GaussianBlur(frame, (5, 5), 0)
+            hsv = cv.cvtColor(blurred, cv.COLOR_BGR2HSV)
+
             detected_objects = []
-            active_color_obj_count = 0
-            active_color_mask = None
 
             # Detect across all colors
-            for idx, color_name in enumerate(COLOR_NAMES):
+            for color_name in COLOR_NAMES:
                 mask = get_color_mask(hsv, color_name, color_config)
                 contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-                matched_for_this_color = 0
                 for cnt in contours:
                     area = cv.contourArea(cnt)
                     if area < min_contour_area:
                         continue
 
-                    matched_for_this_color += 1
                     cx, cy, theta, box = calculate_orientation(cnt)
                     robot_coords = pixel_to_robot(cx, cy, H_matrix)
 
@@ -404,23 +289,11 @@ def main():
                         "robot_coords": robot_coords,
                     })
 
-                if idx == active_color_idx:
-                    active_color_mask = mask
-                    active_color_obj_count = matched_for_this_color
+                # Display active mask in tuner mode
+                if tuner_mode and color_name == COLOR_NAMES[active_color_idx]:
+                    cv.imshow(MASK_WINDOW, mask)
 
-            # Draw Diagnostic & Tuner Panels if Tuner is Active
-            if tuner_mode:
-                draw_tuner_dashboard(color_config, active_color_idx, min_contour_area)
-                if active_color_mask is not None:
-                    draw_diagnostic_mask_window(
-                        frame,
-                        active_color_mask,
-                        COLOR_NAMES[active_color_idx],
-                        tuple(int(x) for x in color_config[COLOR_NAMES[active_color_idx]]["bgr"]),
-                        active_color_obj_count,
-                    )
-
-            # Draw Detections on Main Camera View
+            # Draw Detections
             for obj in detected_objects:
                 cx, cy = obj["pixel"]
                 theta = obj["angle"]
@@ -450,21 +323,14 @@ def main():
 
                 cv.putText(frame, label_txt, (cx - 40, cy - 10), cv.FONT_HERSHEY_SIMPLEX, 0.48, bgr, 2)
 
-            # Clicked point crosshair on camera frame
-            if sampled_point is not None:
-                sx, sy = sampled_point
-                cv.drawMarker(frame, (sx, sy), (0, 255, 255), cv.MARKER_CROSS, 16, 2)
-                cv.putText(frame, f"Sample: H={sampled_hsv[0]}, S={sampled_hsv[1]}, V={sampled_hsv[2]}", (sx + 10, sy - 10), cv.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-
-            # HUD Display on Main View
-            curr_cname = COLOR_NAMES[active_color_idx]
-            hud_status = f"Objects: {len(detected_objects)} | Tuner: {'[' + curr_cname + ']' if tuner_mode else 'OFF [T]'} | Calib: {'YES' if H_matrix is not None else 'NO'}"
+            # HUD Display
+            active_color_label = COLOR_NAMES[active_color_idx] if tuner_mode else "OFF"
+            hud_status = f"Objects: {len(detected_objects)} | Tuner: {active_color_label} [T] | Calib: {'YES' if H_matrix is not None else 'NO'}"
             cv.putText(frame, hud_status, (12, 25), cv.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-            cv.putText(frame, "Hotkeys: 1=Green, 2=Blue, 3=Yellow, 4=Red, t=Tuner, s=Save, q=Quit", (12, 465), cv.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
 
-            cv.imshow(MAIN_WINDOW, frame)
+            cv.imshow("Dobot Vision System v0.2", frame)
 
-            # Periodic logging
+            # Periodic logging (every 1.5 seconds)
             now = time.time()
             if now - last_log_time >= 1.5:
                 last_log_time = now
@@ -494,15 +360,6 @@ def main():
                 print(f"Tuner mode: {'ENABLED' if tuner_mode else 'DISABLED'}")
             elif key == ord('s'):
                 save_color_config(color_config)
-            # Direct numeric hotkeys to switch colors instantly
-            elif key in (ord('1'), ord('2'), ord('3'), ord('4')):
-                target_idx = int(chr(key)) - 1
-                if 0 <= target_idx < len(COLOR_NAMES):
-                    active_color_idx = target_idx
-                    if tuner_mode:
-                        cv.setTrackbarPos("Color (0:G, 1:B, 2:Y, 3:R)", TUNER_WINDOW, active_color_idx)
-                        sync_trackbars_to_color(color_config, active_color_idx)
-                    print(f"Switched active tuning color to: {COLOR_NAMES[active_color_idx]}")
 
     finally:
         cap.release()

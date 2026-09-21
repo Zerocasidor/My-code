@@ -163,7 +163,7 @@ def main():
                     print("🔍 No targets detected within area threshold.")
 
             # Show window
-            cv.imshow("Dobot Color Tracking (dobotImg_0.1)", frame)
+            cv.imshow("Dobot Color Tracking (camara_0.1)", frame)
 
             # Exit key handling
             key = cv.waitKey(1) & 0xFF
