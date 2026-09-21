@@ -14,6 +14,8 @@ DEFAULT_SETTINGS = {
     "block_height": 25.0,
     "ground_z": None,
     "grip_offset": 0.0,
+    # true = คงมุมหมุนตอนหยิบไว้จนวางเสร็จ บล็อกจะวางตรงแนวเดิมไม่หมุนตามแขน
+    "keep_rotation": True,
     "positions": {k: None for k in (
         "pick_1", "temp_1", "pick_2", "temp_2",
         "pick_3", "temp_3", "pick_4", "temp_4", "center")},
@@ -113,16 +115,19 @@ class Mover:
         if z < safe_z - 2.0:
             self.move(x, y, safe_z, r)
 
-    def pick_and_place(self, src, tgt, carry_z, empty_z):
+    def pick_and_place(self, src, tgt, carry_z, empty_z, keep_rotation=True):
         # ขาไปตัวเปล่า (ไม่มีบล็อก) เดินที่ empty_z, ขาถือบล็อกเดินที่ carry_z
         # ไม่ยกขึ้นหลังวาง: การยกครั้งถัดไป (lift) จะยกตรงไปที่ empty_z ของบล็อกถัดไปในครั้งเดียว
+        # keep_rotation: ใช้มุม r ตอนหยิบตลอดขาถือบล็อก บล็อกจึงวางลงตรงแนวเดิม
+        # (ถ้าใช้ r ของจุดปลายทาง บล็อกจะถูกหมุนไปเท่ากับมุมที่แขนกวาดไป)
+        r_place = src["r"] if keep_rotation else tgt["r"]
         self.lift(empty_z)
         self.move(src["x"], src["y"], empty_z, src["r"])
         self.move(src["x"], src["y"], src["z"], src["r"])
         self.suck(True, SUCK_DELAY_MS)
         self.move(src["x"], src["y"], carry_z, src["r"])
-        self.move(tgt["x"], tgt["y"], carry_z, tgt["r"])
-        self.move(tgt["x"], tgt["y"], tgt["z"], tgt["r"])
+        self.move(tgt["x"], tgt["y"], carry_z, r_place)
+        self.move(tgt["x"], tgt["y"], tgt["z"], r_place)
         self.suck(False, RELEASE_DELAY_MS)
         if self.prev_block is not None:
             self.d.wait_for_cmd(self.prev_block)
@@ -150,6 +155,7 @@ def run_operation(device, settings):
     ground_z = settings.get("ground_z")
     block_h = settings.get("block_height", 25.0)
     grip = settings.get("grip_offset", 0.0)
+    keep_rot = settings.get("keep_rotation", True)
     if ground_z is None:
         print("⚠️ ยังไม่ได้ตั้ง Ground ([3]) จะใช้ค่า Z จากการสอนแทน")
 
@@ -171,7 +177,7 @@ def run_operation(device, settings):
         if pick and temp:
             print(f"📦 บล็อก {i}: pick -> temp")
             mover.pick_and_place(at(pick, table_z(pick)), at(temp, table_z(temp)),
-                                 phase1_carry, phase1_empty)
+                                 phase1_carry, phase1_empty, keep_rot)
 
     # Phase 2: สร้าง Tower
     layer = 0
@@ -186,7 +192,7 @@ def run_operation(device, settings):
         print(f"🏗️ บล็อก {i} -> Tower ชั้น {layer + 1}")
         mover.pick_and_place(at(src, table_z(src)), at(center, tgt_z),
                              safe_z_for(base, block_h, layer),
-                             safe_z_for(base, block_h, layer, carrying=False))
+                             safe_z_for(base, block_h, layer, carrying=False), keep_rot)
         layer += 1
     mover.lift(safe_z_for(base, block_h, layer, carrying=False))
     mover.finish()
@@ -222,6 +228,21 @@ def teach_mode(device, settings):
         print(f"✅ {key}: {positions[key]}")
 
 
+def reset_positions(settings):
+    """ล้างพิกัดที่สอนไว้ทั้งหมด (pick_1..4, temp_1..4, center) เพื่อเริ่มสอนใหม่
+    ค่าอื่น เช่น ground_z / ความเร็ว ไม่ถูกแตะ"""
+    filled = [k for k, v in settings["positions"].items() if v]
+    if not filled:
+        print("ℹ️ ยังไม่มีพิกัดที่บันทึกไว้ ไม่ต้องล้าง")
+        return
+    print(f"พิกัดที่มีอยู่ ({len(filled)}): {', '.join(filled)}")
+    if input("ล้างพิกัดทั้งหมดใช่ไหม? (y/n): ").strip().lower() != "y":
+        print("ยกเลิก")
+        return
+    settings["positions"] = {k: None for k in settings["positions"]}
+    print("🧹 ล้างพิกัดทั้งหมดแล้ว (กด [4] Save&Exit เพื่อเขียนลงไฟล์)")
+
+
 def set_ground(device, settings):
     input("👉 เลื่อนหัวดูดแตะพื้นโต๊ะ แล้วกด [Enter]...")
     settings["ground_z"] = round(device.get_pose().position.z, 2)
@@ -241,13 +262,17 @@ def main():
         raise SystemExit(1)
     try:
         while True:
-            choice = input("\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [Enter]Exit > ").strip()
+            choice = input(
+                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ResetPositions "
+                "[Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
             elif choice == "2":
                 teach_mode(device, settings)
             elif choice == "3":
                 set_ground(device, settings)
+            elif choice == "5":
+                reset_positions(settings)
             elif choice == "4":
                 save_settings(settings)
                 break
