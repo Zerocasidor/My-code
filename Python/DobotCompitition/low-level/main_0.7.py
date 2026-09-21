@@ -20,8 +20,8 @@ DEFAULT_SETTINGS = {
     "grip_offset": 0.0,
     # true = คงมุมหมุนตอนหยิบไว้จนวางเสร็จ บล็อกจะวางตรงแนวเดิมไม่หมุนตามแขน
     "keep_rotation": True,
-    # true = ลำดับที่ 3-4 แวะพักที่ temp ก่อน / false = หยิบจากช่องเดิมไปวาง Tower ตรงๆ
-    "use_temp": True,
+    # ลำดับการวาง (1-4) ที่ต้องแวะพักที่ temp ก่อน / [] = ไม่ใช้ temp เลย
+    "temp_orders": [3, 4],
     "order": [1, 2, 3, 4],
     "colors": ["g", "r", "y", "b"],
     "last_input": "g r y b",   # ลำดับที่กรอกล่าสุด (เลขช่องหรือสี) ใช้เป็นค่าเริ่มต้นครั้งถัดไป
@@ -55,6 +55,9 @@ def load_settings():
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         s["positions"].update(data.pop("positions", None) or {})
+        old = data.pop("use_temp", None)   # ไฟล์เก่าเก็บเป็น true/false -> แปลงเป็นรายการลำดับ
+        if old is not None and "temp_orders" not in data:
+            data["temp_orders"] = [3, 4] if old else []
         s.update(data)
     except FileNotFoundError:
         pass
@@ -171,14 +174,50 @@ def safe_z_for(base, block_h, tower_height, carrying=True):
 # ==========================================
 # 📐 คำนวณพิกัดจากมุมกริดที่สอนไว้
 # ==========================================
-def point(x, y):
-    """มุมหมุน r = atan2(y, x) เสมอ (ตรงกับค่าที่สอนไว้ทุกจุดในเวอร์ชันก่อน)"""
-    return {"x": round(x, 2), "y": round(y, 2),
-            "r": round(math.degrees(math.atan2(y, x)), 2)}
+def point(x, y, z=None):
+    """มุมหมุน r = atan2(y, x) เสมอ (ตรงกับค่าที่สอนไว้ทุกจุดในเวอร์ชันก่อน)
+    z (ถ้ามี) = ระดับ "ผิวบนของบล็อก" ที่วางอยู่ตรงจุดนั้น"""
+    p = {"x": round(x, 2), "y": round(y, 2),
+         "r": round(math.degrees(math.atan2(y, x)), 2)}
+    if z is not None:
+        p["z"] = round(z, 2)
+    return p
 
 
 def lerp(a, b, t):
     return a + (b - a) * t
+
+
+def solve3(rows):
+    """แก้ระบบสมการ 3 ตัวแปรด้วย Gaussian elimination — rows = [[a, b, c, rhs], ...]"""
+    m = [list(r) for r in rows]
+    for i in range(3):
+        piv = max(range(i, 3), key=lambda k: abs(m[k][i]))
+        if abs(m[piv][i]) < 1e-9:
+            return None
+        m[i], m[piv] = m[piv], m[i]
+        for k in range(i + 1, 3):
+            f = m[k][i] / m[i][i]
+            for j in range(i, 4):
+                m[k][j] -= f * m[i][j]
+    x = [0.0, 0.0, 0.0]
+    for i in (2, 1, 0):
+        x[i] = (m[i][3] - sum(m[i][j] * x[j] for j in range(i + 1, 3))) / m[i][i]
+    return x
+
+
+def fit_plane(pts):
+    """ระนาบ z = a + b*x + c*y จากจุดที่สอน (3 จุด = ผ่านพอดี, 4 จุด = least-squares)
+    โต๊ะ/แขนกลไม่ได้ราบ 100% วัดจากของจริงได้ความชัน 3-4 mm ต่อระยะ 100 mm ในแกน x
+    ถ้าใช้ z ค่าเดียวทั้งกระดานจะคลาดได้ถึง ~3 mm (ช่องไกลดูดไม่ติด / ช่องใกล้กดลงบล็อก)
+    ใช้ normal equations เพราะมีแค่ 3 ตัวแปร ไม่ต้องพึ่ง numpy"""
+    pts = [p for p in pts if p and p.get("z") is not None]
+    if len(pts) < 3:
+        return None
+    basis = [(1.0, p["x"], p["y"]) for p in pts]
+    rows = [[sum(b[i] * b[j] for b in basis) for j in range(3)]
+            + [sum(b[i] * p["z"] for b, p in zip(basis, pts))] for i in range(3)]
+    return solve3(rows)
 
 
 REQUIRED_CORNERS = ("grid_1", "grid_3", "grid_8")   # บนซ้าย, บนขวา, ล่างขวา
@@ -192,7 +231,9 @@ def build_grid(positions):
 
     - 3 มุม (grid_1, grid_3, grid_8): คำนวณตรงๆ ผ่านทั้งสามจุดพอดี
     - 4 มุม (มี grid_6 ด้วย): ใช้ least-squares เฉลี่ยความคลาดจากการสอนทั้งสี่มุม
-      (มุมทั้งสี่อยู่ที่ (แถว,คอลัมน์) = (0,0),(0,2),(2,0),(2,2) เป็นดีไซน์สมดุล จึงมีสูตรปิด)"""
+      (มุมทั้งสี่อยู่ที่ (แถว,คอลัมน์) = (0,0),(0,2),(2,0),(2,2) เป็นดีไซน์สมดุล จึงมีสูตรปิด)
+
+    z ของแต่ละช่องมาจากระนาบที่ฟิตจาก z ของมุมที่สอนไว้ (ทุกมุมสอนที่ผิวบนบล็อก)"""
     p1, p3, p8 = (positions.get(k) for k in REQUIRED_CORNERS)
     if not (p1 and p3 and p8):
         return None
@@ -207,8 +248,13 @@ def build_grid(positions):
         ox, oy = p1["x"], p1["y"]
         ux, uy = ((p3[c] - p1[c]) / 2 for c in "xy")
         vx, vy = ((p8[c] - p3[c]) / 2 for c in "xy")
-    return {name: point(ox + col * ux + row * vx, oy + col * uy + row * vy)
-            for name, (row, col) in GRID_LAYOUT.items()}
+    plane = fit_plane((p1, p3, p8, p6))
+    cells = {}
+    for name, (row, col) in GRID_LAYOUT.items():
+        x, y = ox + col * ux + row * vx, oy + col * uy + row * vy
+        cells[name] = point(x, y, None if plane is None
+                            else plane[0] + plane[1] * x + plane[2] * y)
+    return cells
 
 
 def warn_missing_grid(positions):
@@ -224,13 +270,49 @@ def warn_missing_grid(positions):
         print(f"❌ ยังสอนมุมกริดไม่ครบ ขาด: {', '.join(missing)} — ใช้ [2] Teach ก่อน")
 
 
-def build_temps(positions):
-    """คำนวณจุดพัก 4 ช่อง จากช่องบนสุด (temp_top) ถึงช่องล่างสุด (temp_last)"""
+def build_temps(positions, block_h):
+    """คำนวณจุดพัก 4 ช่อง จากช่องบนสุด (temp_top) ถึงช่องล่างสุด (temp_last)
+    สองจุดนี้สอนที่ "พื้น" จึงบวกความสูงบล็อกกลับเข้าไป ให้ z มีความหมายเดียวกับของกริด
+    (= ผิวบนของบล็อกที่วางตรงนั้น) และเอียงตามพื้นจริงระหว่างสองจุด"""
     a, b = positions.get("temp_top"), positions.get("temp_last")
     if not (a and b):
         return None
-    return {i: point(lerp(a["x"], b["x"], (i - 1) / 3), lerp(a["y"], b["y"], (i - 1) / 3))
+    has_z = a.get("z") is not None and b.get("z") is not None
+    return {i: point(lerp(a["x"], b["x"], (i - 1) / 3), lerp(a["y"], b["y"], (i - 1) / 3),
+                     lerp(a["z"], b["z"], (i - 1) / 3) + block_h if has_z else None)
             for i in range(1, 5)}
+
+
+MIN_BLOCK_H = 8.0   # ต่ำกว่านี้แปลว่ามุมกริดถูกสอนที่พื้น ไม่ใช่ผิวบนบล็อก
+
+
+def measured_block_height(positions):
+    """ความสูงบล็อกที่วัดได้ = ผิวบนเฉลี่ยของมุมกริด - พื้นเฉลี่ยของจุดพัก"""
+    tops = [positions[k]["z"] for k in GRID_CORNERS
+            if positions.get(k) and positions[k].get("z") is not None]
+    floors = [positions[k]["z"] for k in ("temp_top", "temp_last")
+              if positions.get(k) and positions[k].get("z") is not None]
+    if not tops or not floors:
+        return None
+    return sum(tops) / len(tops) - sum(floors) / len(floors)
+
+
+def check_z_scheme(positions, settings):
+    """กันเคสอันตราย: ถ้ามุมกริดถูกสอนที่ "พื้น" แบบเวอร์ชันก่อน z ที่คำนวณได้จะต่ำไปทั้งกระดาน
+    แขนจะกดลงโต๊ะ — คืน (ข้อความ, ต้องหยุดไหม) หรือ None ถ้าปกติ"""
+    h = measured_block_height(positions)
+    if h is None:
+        return None
+    if h < MIN_BLOCK_H:
+        return (f"❌ ผิวบนของมุมกริดสูงกว่าพื้นแค่ {h:.2f} mm — มุมกริดน่าจะถูกสอนที่ 'พื้น'\n"
+                f"   ตอนนี้ต้องสอนทั้ง 4 มุมที่ 'ผิวบนของบล็อก' กด [6] ResetPositions แล้ว [2] Teach ใหม่",
+                True)
+    diff = h - settings.get("block_height", 25.0)
+    if abs(diff) > 2.0:
+        return (f"⚠️ block_height ที่ตั้งไว้ {settings.get('block_height', 25.0):.2f} mm "
+                f"ต่างจากที่วัดได้ {h:.2f} mm ({diff:+.2f}) — สอนใหม่ด้วย [2] Teach จะอัปเดตให้เอง",
+                False)
+    return None
 
 
 def valid_order(order):
@@ -401,19 +483,30 @@ def get_order(settings, grid):
 def show_layout(settings):
     """แสดงพิกัดที่คำนวณได้ทั้งหมด"""
     grid = build_grid(settings["positions"])
-    temps = build_temps(settings["positions"])
+    temps = build_temps(settings["positions"], settings.get("block_height", 25.0))
     if not grid:
         warn_missing_grid(settings["positions"])
         return
+    warn = check_z_scheme(settings["positions"], settings)
+    if warn:
+        print(warn[0])
     mode = "4 มุม (least-squares)" if settings["positions"].get(OPTIONAL_CORNER) else "3 มุม"
     print(f"\n📋 กริด 3x3 (ซ้าย->ขวา, บน->ล่าง) — คำนวณจาก {mode}:")
     for row in ([1, 2, 3], [4, "c", 5], [6, 7, 8]):
         print("   " + " | ".join(
             f"{n}: ({grid[n]['x']:7.2f},{grid[n]['y']:7.2f}) r={grid[n]['r']:6.2f}" for n in row))
+    zs = [grid[n].get("z") for n in GRID_LAYOUT]
+    if None not in zs:
+        print(f"📐 ผิวบนบล็อกแต่ละช่อง (จากระนาบที่ฟิตไว้ ต่างกันได้ {max(zs) - min(zs):.2f} mm):")
+        for row in ([1, 2, 3], [4, "c", 5], [6, 7, 8]):
+            print("   " + " | ".join(f"{n}: {grid[n]['z']:7.2f}" for n in row))
+    else:
+        print("⚠️ ข้อมูลที่สอนไม่มี z ครบ — ใช้ ground_z + block_height เท่ากันทุกช่องแทน")
     if temps:
         print("📋 จุดพัก (บน->ล่าง):")
         for i in range(1, 5):
-            print(f"   temp_{i}: ({temps[i]['x']:7.2f},{temps[i]['y']:7.2f}) r={temps[i]['r']:6.2f}")
+            z = f" z={temps[i]['z']:7.2f}" if temps[i].get("z") is not None else ""
+            print(f"   temp_{i}: ({temps[i]['x']:7.2f},{temps[i]['y']:7.2f}) r={temps[i]['r']:6.2f}{z}")
     else:
         print("⚠️ ยังไม่ได้สอนจุดพัก (temp_top / temp_last)")
 
@@ -424,12 +517,17 @@ def show_layout(settings):
 def run_operation(device, settings):
     positions = settings["positions"]
     grid = build_grid(positions)
-    temps = build_temps(positions)
-    use_temp = settings.get("use_temp", True)
+    temps = build_temps(positions, settings.get("block_height", 25.0))
+    temp_orders = settings.get("temp_orders", [3, 4])
     if not grid:
         warn_missing_grid(positions)
         return
-    if use_temp and not temps:
+    warn = check_z_scheme(positions, settings)
+    if warn:
+        print(warn[0])
+        if warn[1]:
+            return
+    if temp_orders and not temps:
         print("❌ ยังไม่ได้สอนจุดพัก (temp_top / temp_last) — ใช้ [2] Teach หรือปิด temp ที่เมนู [7]")
         return
     ground_z = settings.get("ground_z")
@@ -444,20 +542,25 @@ def run_operation(device, settings):
     block_h = settings.get("block_height", 25.0)
     grip = settings.get("grip_offset", 0.0)
     keep_rot = settings.get("keep_rotation", True)
-    table_z = ground_z + block_h + grip   # ระดับผิวบนของบล็อกที่วางบนโต๊ะ
     center = grid["c"]
+    fallback_top = ground_z + block_h     # ใช้เมื่อฟิตระนาบไม่ได้ (ข้อมูลเก่าไม่มี z)
 
-    # ลำดับที่ 3 และ 4 ต้องย้ายไปพักก่อนเสมอ (Tower สูง 2-3 ชั้นแล้ว เสี่ยงชนตอนเอื้อมข้าม)
-    # ลำดับที่ 1-2 ไม่ต้องพัก เพราะ Tower ยังสูงไม่เกิน 1 ชั้น
-    # ช่องพักไล่จาก 4 ไป 1 เพื่อไม่ให้ชนกันเอง / ปิดการพักได้ที่เมนู [7]
+    def top_of(pos):
+        """ระดับที่หัวดูดต้องลงไปแตะผิวบนบล็อกตรงจุดนั้น (ไม่เท่ากันทุกช่องเพราะโต๊ะเอียง)"""
+        return pos.get("z", fallback_top) + grip
+
+    base_z = center.get("z", fallback_top) - block_h   # พื้นใต้ Tower ใช้อ้างอิงความสูงเดินทาง
+
+    # ลำดับการวางที่เลือกไว้ในเมนู [7] จะถูกย้ายไปพักที่ temp ก่อน (ค่าเริ่มต้น 3,4)
+    # เพราะตอนวางชั้นท้ายๆ Tower สูง 2-3 ชั้นแล้ว เสี่ยงชนตอนเอื้อมข้ามไปหยิบจากช่องเดิม
+    # ช่องพักไล่จาก 4 ไป 1 เพื่อไม่ให้ชนกันเอง
     staged = {}
     free_slots = [4, 3, 2, 1]
-    if use_temp:
-        for i, b in enumerate(order):
-            if i >= 2:
-                staged[b] = temps[free_slots.pop(0)]
-    else:
-        print("⚠️ ปิดการใช้จุดพัก (temp) อยู่ — หยิบจากช่องเดิมไปวาง Tower ตรงๆ")
+    for i, b in enumerate(order):
+        if (i + 1) in temp_orders:
+            staged[b] = temps[free_slots.pop(0)]
+    if not staged:
+        print("⚠️ ไม่ได้ใช้จุดพัก (temp) — หยิบจากช่องเดิมไปวาง Tower ตรงๆ")
 
     plan = " -> ".join(f"{b}{'(พัก)' if b in staged else ''}" for b in order)
     print(f"\n🗒️ ลำดับ: {plan}")
@@ -469,23 +572,24 @@ def run_operation(device, settings):
     mover = Mover(device)
 
     # Phase 1: ย้ายบล็อก 1-4 ไปช่องพัก (ไล่ temp 4 -> 1)
-    carry_z = safe_z_for(ground_z, block_h, 0)
-    empty_z = safe_z_for(ground_z, block_h, 0, carrying=False)
+    carry_z = safe_z_for(base_z, block_h, 0)
+    empty_z = safe_z_for(base_z, block_h, 0, carrying=False)
     for b in order:
         if b in staged:
             print(f"📦 บล็อก {b} -> จุดพัก")
-            mover.pick_and_place(at(grid[b], table_z), at(staged[b], table_z),
+            mover.pick_and_place(at(grid[b], top_of(grid[b])), at(staged[b], top_of(staged[b])),
                                  carry_z, empty_z, keep_rot)
 
     # Phase 2: สร้าง Tower ที่ช่องกลาง (c)
+    # ชั้นที่ 1 วางที่ผิวบนบล็อกของช่อง c พอดี (= พื้นตรงนั้น + 1 บล็อก) แล้วบวกทีละชั้น
     for layer, b in enumerate(order):
         src = staged.get(b, grid[b])
-        tgt_z = ground_z + (layer + 1) * block_h + grip
+        tgt_z = top_of(center) + layer * block_h
         print(f"🏗️ บล็อก {b} -> Tower ชั้น {layer + 1}")
-        mover.pick_and_place(at(src, table_z), at(center, tgt_z),
-                             safe_z_for(ground_z, block_h, layer),
-                             safe_z_for(ground_z, block_h, layer, carrying=False), keep_rot)
-    mover.lift(safe_z_for(ground_z, block_h, len(order), carrying=False))
+        mover.pick_and_place(at(src, top_of(src)), at(center, tgt_z),
+                             safe_z_for(base_z, block_h, layer),
+                             safe_z_for(base_z, block_h, layer, carrying=False), keep_rot)
+    mover.lift(safe_z_for(base_z, block_h, len(order), carrying=False))
     mover.finish()
     print(f"🎉 สร้าง Tower เสร็จ {len(order)} ชั้น | ⏱️ {time.perf_counter() - start:.2f} sec")
 
@@ -528,24 +632,46 @@ def teach_mode(device, settings):
         settings["ground_z"] = round((t1["z"] + t4["z"]) / 2, 2)
         print(f"📏 ตั้ง Ground Z = {settings['ground_z']:.2f} mm "
               f"(เฉลี่ยจากจุดพัก {t1['z']:.2f} / {t4['z']:.2f})")
-        tops = [positions[k]["z"] for k in GRID_CORNERS if positions.get(k)]
-        if tops:
-            measured = sum(tops) / len(tops) - settings["ground_z"]
-            print(f"   ความสูงบล็อกที่วัดได้ (ผิวบนเฉลี่ย {len(tops)} มุม - พื้น) = {measured:.2f} mm "
-                  f"(ค่าที่ใช้อยู่ {settings['block_height']:.2f} mm)")
+        h = measured_block_height(positions)
+        if h is None:
+            pass
+        elif h < MIN_BLOCK_H:
+            print(f"⚠️ ผิวบนของมุมกริดสูงกว่าพื้นแค่ {h:.2f} mm "
+                  f"— มุมกริดต้องสอนที่ 'ผิวบนของบล็อก' ไม่ใช่พื้น")
+        else:
+            old = settings.get("block_height", 25.0)
+            settings["block_height"] = round(h, 2)
+            print(f"📦 ความสูงบล็อกที่วัดได้ = {h:.2f} mm (เดิม {old:.2f}) -> อัปเดตให้แล้ว")
     else:
         print("⚠️ ยังไม่ได้สอนจุดพักครบ 2 จุด จึงยังไม่ได้ตั้ง Ground — ใช้ [3] SetGround แทนได้")
     show_layout(settings)
 
 
-def toggle_temp(settings):
-    """เปิด/ปิดการแวะพักที่ temp ของลำดับที่ 3-4"""
-    settings["use_temp"] = not settings.get("use_temp", True)
-    if settings["use_temp"]:
-        print("✅ เปิดการใช้จุดพัก: ลำดับที่ 3-4 จะแวะพักที่ temp ก่อน")
-    else:
+def configure_temp(settings):
+    """เลือกว่า 'ลำดับการวาง' ไหนบ้างที่ต้องแวะพักที่ temp ก่อน
+    เช่น '2 3 4' = ลำดับ 2,3,4 พัก | '4' = พักแค่ลำดับสุดท้าย | Enter เฉยๆ = ไม่ใช้ temp เลย"""
+    cur = settings.get("temp_orders", [3, 4])
+    print("เลขที่กรอกคือ 'ลำดับการวาง' (1-4) ไม่ใช่หมายเลขช่อง")
+    print("   ลำดับท้ายๆ เสี่ยงชน Tower ตอนเอื้อมข้ามไปหยิบ ลำดับ 1-2 มักไม่ต้องพัก")
+    raw = input(f"ลำดับที่ให้แวะพัก temp เช่น '2 3 4' หรือ '4' [ตอนนี้: "
+                f"{','.join(map(str, cur)) or 'ไม่ใช้'}] (Enter=ไม่ใช้เลย, q=ยกเลิก): ").strip()
+    if raw.lower() == "q":
+        print("ยกเลิก ไม่เปลี่ยนค่าเดิม")
+        return
+    if not raw:
+        settings["temp_orders"] = []
         print("⛔ ปิดการใช้จุดพัก: ทุกลำดับหยิบจากช่องเดิมไปวาง Tower ตรงๆ "
               "(เสี่ยงชน Tower ตอนเอื้อมข้าม)")
+        return
+    try:
+        picked = sorted({int(t) for t in raw.replace(",", " ").split()})
+    except ValueError:
+        picked = []
+    if not picked or picked[0] < 1 or picked[-1] > 4:
+        print("❌ ต้องเป็นเลข 1-4 เท่านั้น ไม่เปลี่ยนค่าเดิม")
+        return
+    settings["temp_orders"] = picked
+    print(f"✅ ลำดับที่จะแวะพักที่ temp: {', '.join(map(str, picked))}")
 
 
 def reset_positions(settings):
@@ -582,7 +708,7 @@ def main():
         raise SystemExit(1)
     try:
         while True:
-            temp_state = "ON" if settings.get("use_temp", True) else "OFF"
+            temp_state = ",".join(map(str, settings.get("temp_orders", []))) or "OFF"
             choice = input(
                 "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
                 f"[6]ResetPositions [7]Temp:{temp_state} [Enter]Exit > ").strip()
@@ -591,7 +717,7 @@ def main():
             elif choice == "6":
                 reset_positions(settings)
             elif choice == "7":
-                toggle_temp(settings)
+                configure_temp(settings)
             elif choice == "2":
                 teach_mode(device, settings)
             elif choice == "3":
