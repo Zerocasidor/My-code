@@ -18,8 +18,13 @@ DEFAULT_SETTINGS = {
     "block_height": 25.0,
     "ground_z": None,
     "grip_offset": 0.0,
+    # true = คงมุมหมุนตอนหยิบไว้จนวางเสร็จ บล็อกจะวางตรงแนวเดิมไม่หมุนตามแขน
+    "keep_rotation": True,
+    # true = ลำดับที่ 3-4 แวะพักที่ temp ก่อน / false = หยิบจากช่องเดิมไปวาง Tower ตรงๆ
+    "use_temp": True,
     "order": [1, 2, 3, 4],
     "colors": ["g", "r", "y", "b"],
+    "last_input": "g r y b",   # ลำดับที่กรอกล่าสุด (เลขช่องหรือสี) ใช้เป็นค่าเริ่มต้นครั้งถัดไป
     "flip_camera": True,   # กล้องอยู่ฝั่งตรงข้ามหุ่น ภาพจึงกลับด้าน 180°
     "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_last")},
 }
@@ -131,16 +136,19 @@ class Mover:
         if z < safe_z - 2.0:
             self.move(x, y, safe_z, r)
 
-    def pick_and_place(self, src, tgt, carry_z, empty_z):
+    def pick_and_place(self, src, tgt, carry_z, empty_z, keep_rotation=True):
         # ขาไปตัวเปล่า (ไม่มีบล็อก) เดินที่ empty_z, ขาถือบล็อกเดินที่ carry_z
         # ไม่ยกขึ้นหลังวาง: การยกครั้งถัดไป (lift) จะยกตรงไปที่ empty_z ของบล็อกถัดไปในครั้งเดียว
+        # keep_rotation: ใช้มุม r ตอนหยิบตลอดขาถือบล็อก บล็อกจึงวางลงตรงแนวเดิม
+        # (ถ้าใช้ r ของจุดปลายทาง บล็อกจะถูกหมุนไปเท่ากับมุมที่แขนกวาดไป)
+        r_place = src["r"] if keep_rotation else tgt["r"]
         self.lift(empty_z)
         self.move(src["x"], src["y"], empty_z, src["r"])
         self.move(src["x"], src["y"], src["z"], src["r"])
         self.suck(True, SUCK_DELAY_MS)
         self.move(src["x"], src["y"], carry_z, src["r"])
-        self.move(tgt["x"], tgt["y"], carry_z, tgt["r"])
-        self.move(tgt["x"], tgt["y"], tgt["z"], tgt["r"])
+        self.move(tgt["x"], tgt["y"], carry_z, r_place)
+        self.move(tgt["x"], tgt["y"], tgt["z"], r_place)
         self.suck(False, RELEASE_DELAY_MS)
         if self.prev_block is not None:
             self.d.wait_for_cmd(self.prev_block)
@@ -252,20 +260,46 @@ def blocks_from_camera(settings):
     return blocks
 
 
-def ask_colors(settings):
-    """กรอกลำดับสี 4 ตัว เช่น 'g r y b' (ซ้ำสีได้ไม่เกินสีละ 2)"""
-    cur = " ".join(settings.get("colors", []))
-    legend = ", ".join(f"{k}={v}" for k, v in COLORS.items())
-    raw = input(f"ลำดับสี 4 ตัว ({legend}) [{cur}] (Enter=ค่าเดิม): ").strip().lower()
-    colors = (raw or cur).replace(",", " ").split()
+def valid_colors(colors):
+    """ลำดับสีที่ใช้ได้: g/r/y/b จำนวน 4 ตัว สีเดียวกันซ้ำได้ไม่เกิน 2 (บนโต๊ะมีสีละ 2 ก้อน)"""
+    colors = [str(c).lower() for c in colors]
     if len(colors) != 4 or any(c not in COLORS for c in colors):
-        print(f"❌ ต้องเป็น {' / '.join(COLORS)} จำนวน 4 ตัว")
         return None
     if any(colors.count(c) > 2 for c in colors):
         print("❌ สีเดียวกันซ้ำได้ไม่เกิน 2 (บนโต๊ะมีสีละ 2 ก้อน)")
         return None
-    settings["colors"] = colors
     return colors
+
+
+def ask_input(settings, numbers_only=False):
+    """รับลำดับ 4 ตัว ได้ทั้ง 'เลขช่อง' (1-8 ไม่ซ้ำ) และ 'สี' (g/r/y/b ซ้ำได้ไม่เกินสีละ 2)
+    คืน ("order", [ช่อง...]) หรือ ("colors", [สี...]) หรือ None"""
+    cur = settings.get("last_input") or " ".join(str(b) for b in settings.get("order", []))
+    legend = ", ".join(f"{k}={v}" for k, v in COLORS.items())
+    prompt = ("ลำดับ 4 ตัว — เลขช่อง 1-8 เช่น '3 5 8 2'"
+              + ("" if numbers_only else f" หรือสี ({legend}) เช่น 'g r y b'")
+              + f" [{cur}] (Enter=ค่าเดิม): ")
+    tokens = (input(prompt).strip().lower() or cur).replace(",", " ").split()
+
+    if tokens and all(t.isdigit() for t in tokens):
+        order = valid_order(tokens)
+        if not order:
+            print("❌ เลขช่องต้องเป็น 1-8 จำนวน 4 ตัว ไม่ซ้ำกัน")
+            return None
+        settings["last_input"] = " ".join(str(b) for b in order)
+        settings["order"] = order
+        return "order", order
+
+    if numbers_only:
+        print("❌ ตอนนี้กล้องใช้ไม่ได้ ต้องกรอกเป็นเลขช่อง 1-8 จำนวน 4 ตัว")
+        return None
+    colors = valid_colors(tokens)
+    if not colors:
+        print(f"❌ ต้องเป็นเลขช่อง 1-8 จำนวน 4 ตัว หรือสี {' / '.join(COLORS)} จำนวน 4 ตัว")
+        return None
+    settings["last_input"] = " ".join(colors)
+    settings["colors"] = colors
+    return "colors", colors
 
 
 def near_rank(grid):
@@ -306,24 +340,28 @@ def order_from_colors(colors, blocks, grid):
     return order
 
 
-def get_order(settings, grid, use_camera=True):
-    """โหมดกล้อง: กรอกลำดับ 'สี' แล้วให้กล้องบอกว่าสีไหนอยู่ช่องไหน
-    ถ้ากล้องใช้ไม่ได้ ตกมาที่การกรอกลำดับ 'ช่อง' เอง"""
-    if use_camera:
-        colors = ask_colors(settings)
-        blocks = blocks_from_camera(settings) if colors else None
-        if blocks:
-            order = order_from_colors(colors, blocks, grid)
-            if order:
-                print("🎨 ลำดับที่ได้: " + " -> ".join(
-                    f"{c}(ช่อง {b})" for c, b in zip(colors, order)))
-                settings["order"] = order
-                return order
-        print("↩️ ใช้การกรอกลำดับช่องเองแทน")
-    order = ask_order(settings)
-    if order:
-        settings["order"] = order
-    return order
+def get_order(settings, grid):
+    """กรอกเป็นเลขช่อง = ใช้ตรงๆ (ไม่แตะกล้อง) / กรอกเป็นสี = ถามกล้องว่าสีไหนอยู่ช่องไหน
+    ถ้ากล้องใช้ไม่ได้ จะให้กรอกใหม่เป็นเลขช่อง"""
+    answer = ask_input(settings)
+    if not answer:
+        return None
+    kind, value = answer
+    if kind == "order":
+        return value
+
+    colors = value
+    blocks = blocks_from_camera(settings)
+    if blocks:
+        order = order_from_colors(colors, blocks, grid)
+        if order:
+            print("🎨 ลำดับที่ได้: " + " -> ".join(
+                f"{c}(ช่อง {b})" for c, b in zip(colors, order)))
+            settings["order"] = order
+            return order
+    print("↩️ กล้องใช้ไม่ได้ กรอกเป็นเลขช่องแทน")
+    answer = ask_input(settings, numbers_only=True)
+    return answer[1] if answer else None
 
 
 def show_layout(settings):
@@ -348,34 +386,41 @@ def show_layout(settings):
 # ==========================================
 # 🚀 RUN
 # ==========================================
-def run_operation(device, settings, use_camera=True):
+def run_operation(device, settings):
     positions = settings["positions"]
     grid = build_grid(positions)
     temps = build_temps(positions)
-    if not grid or not temps:
-        print("❌ ยังสอนตำแหน่งไม่ครบ 4 จุด กรุณาใช้ [2] Teach ก่อน")
+    use_temp = settings.get("use_temp", True)
+    if not grid or (use_temp and not temps):
+        print("❌ ยังสอนตำแหน่งไม่ครบ กรุณาใช้ [2] Teach ก่อน"
+              + ("" if use_temp else " (โหมดปิด temp ต้องมีอย่างน้อย grid_1 กับ grid_8)"))
         return
     ground_z = settings.get("ground_z")
     if ground_z is None:
         print("❌ ยังไม่ได้ตั้ง Ground ใช้ [3] SetGround ก่อน")
         return
 
-    order = get_order(settings, grid, use_camera=use_camera)
+    order = get_order(settings, grid)
     if not order:
         return
 
     block_h = settings.get("block_height", 25.0)
     grip = settings.get("grip_offset", 0.0)
+    keep_rot = settings.get("keep_rotation", True)
     table_z = ground_z + block_h + grip   # ระดับผิวบนของบล็อกที่วางบนโต๊ะ
     center = grid["c"]
 
-    # บล็อก 1-4 ต้องย้ายไปพักก่อน ใช้ช่องพักจาก 4 ไป 1 เพื่อป้องกันชน
-    # ยกเว้นลำดับที่ 1-2 เพราะ Tower ยังสูงไม่เกิน 1 ชั้น ไม่มีอะไรให้ชน
+    # ลำดับที่ 3 และ 4 ต้องย้ายไปพักก่อนเสมอ (Tower สูง 2-3 ชั้นแล้ว เสี่ยงชนตอนเอื้อมข้าม)
+    # ลำดับที่ 1-2 ไม่ต้องพัก เพราะ Tower ยังสูงไม่เกิน 1 ชั้น
+    # ช่องพักไล่จาก 4 ไป 1 เพื่อไม่ให้ชนกันเอง / ปิดการพักได้ที่เมนู [7]
     staged = {}
     free_slots = [4, 3, 2, 1]
-    for i, b in enumerate(order):
-        if b <= 4 and i >= 2:
-            staged[b] = temps[free_slots.pop(0)]
+    if use_temp:
+        for i, b in enumerate(order):
+            if i >= 2:
+                staged[b] = temps[free_slots.pop(0)]
+    else:
+        print("⚠️ ปิดการใช้จุดพัก (temp) อยู่ — หยิบจากช่องเดิมไปวาง Tower ตรงๆ")
 
     plan = " -> ".join(f"{b}{'(พัก)' if b in staged else ''}" for b in order)
     print(f"\n🗒️ ลำดับ: {plan}")
@@ -392,7 +437,8 @@ def run_operation(device, settings, use_camera=True):
     for b in order:
         if b in staged:
             print(f"📦 บล็อก {b} -> จุดพัก")
-            mover.pick_and_place(at(grid[b], table_z), at(staged[b], table_z), carry_z, empty_z)
+            mover.pick_and_place(at(grid[b], table_z), at(staged[b], table_z),
+                                 carry_z, empty_z, keep_rot)
 
     # Phase 2: สร้าง Tower ที่ช่องกลาง (c)
     for layer, b in enumerate(order):
@@ -401,7 +447,7 @@ def run_operation(device, settings, use_camera=True):
         print(f"🏗️ บล็อก {b} -> Tower ชั้น {layer + 1}")
         mover.pick_and_place(at(src, table_z), at(center, tgt_z),
                              safe_z_for(ground_z, block_h, layer),
-                             safe_z_for(ground_z, block_h, layer, carrying=False))
+                             safe_z_for(ground_z, block_h, layer, carrying=False), keep_rot)
     mover.lift(safe_z_for(ground_z, block_h, len(order), carrying=False))
     mover.finish()
     print(f"🎉 สร้าง Tower เสร็จ {len(order)} ชั้น | ⏱️ {time.perf_counter() - start:.2f} sec")
@@ -445,6 +491,31 @@ def teach_mode(device, settings):
     show_layout(settings)
 
 
+def toggle_temp(settings):
+    """เปิด/ปิดการแวะพักที่ temp ของลำดับที่ 3-4"""
+    settings["use_temp"] = not settings.get("use_temp", True)
+    if settings["use_temp"]:
+        print("✅ เปิดการใช้จุดพัก: ลำดับที่ 3-4 จะแวะพักที่ temp ก่อน")
+    else:
+        print("⛔ ปิดการใช้จุดพัก: ทุกลำดับหยิบจากช่องเดิมไปวาง Tower ตรงๆ "
+              "(เสี่ยงชน Tower ตอนเอื้อมข้าม)")
+
+
+def reset_positions(settings):
+    """ล้างพิกัดที่สอนไว้ทั้งหมด (grid_1, grid_8, temp_top, temp_last) เพื่อเริ่มสอนใหม่
+    ค่าอื่น เช่น ground_z / ความเร็ว ไม่ถูกแตะ"""
+    filled = [k for k, v in settings["positions"].items() if v]
+    if not filled:
+        print("ℹ️ ยังไม่มีพิกัดที่บันทึกไว้ ไม่ต้องล้าง")
+        return
+    print(f"พิกัดที่มีอยู่ ({len(filled)}): {', '.join(filled)}")
+    if input("ล้างพิกัดทั้งหมดใช่ไหม? (y/n): ").strip().lower() != "y":
+        print("ยกเลิก")
+        return
+    settings["positions"] = {k: None for k in settings["positions"]}
+    print("🧹 ล้างพิกัดทั้งหมดแล้ว (กด [4] Save&Exit เพื่อเขียนลงไฟล์)")
+
+
 def set_ground(device, settings):
     input("👉 เลื่อนหัวดูดแตะพื้นโต๊ะ แล้วกด [Enter]...")
     settings["ground_z"] = round(device.get_pose().position.z, 2)
@@ -464,13 +535,16 @@ def main():
         raise SystemExit(1)
     try:
         while True:
+            temp_state = "ON" if settings.get("use_temp", True) else "OFF"
             choice = input(
-                "\n[1]Run(กล้อง) [2]Teach&Save [3]SetGround [4]Save&Exit "
-                "[5]ShowLayout [6]Run(กรอกเอง) [Enter]Exit > ").strip()
+                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
+                f"[6]ResetPositions [7]Temp:{temp_state} [Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
             elif choice == "6":
-                run_operation(device, settings, use_camera=False)
+                reset_positions(settings)
+            elif choice == "7":
+                toggle_temp(settings)
             elif choice == "2":
                 teach_mode(device, settings)
             elif choice == "3":

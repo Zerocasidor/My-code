@@ -3,8 +3,10 @@
     "robot_speed": 100,
     "robot_accel": 100,
     "block_height": 25.0,
-    "ground_z": -64.35,
+    "ground_z": -67.61,
     "grip_offset": 0.0,
+    "keep_rotation": true,
+    "use_temp": true,
     "order": [
         1,
         2,
@@ -12,9 +14,29 @@
         4
     ],
     "positions": {
-        "grid_1": null,
-        "grid_8": null,
-        "temp_top": null,
-        "temp_last": null
+        "grid_1": {
+            "x": 263.52,
+            "y": 56.61,
+            "z": -69.69,
+            "r": 31.93
+        },
+        "grid_8": {
+            "x": 203.29,
+            "y": -16.38,
+            "z": -67.61,
+            "r": 15.2
+        },
+        "temp_top": {
+            "x": 267.8,
+            "y": 101.19,
+            "z": -69.43,
+            "r": 40.5
+        },
+        "temp_last": {
+            "x": 176.86,
+            "y": 96.8,
+            "z": -66.24,
+            "r": 48.5
+        }
     }
 }

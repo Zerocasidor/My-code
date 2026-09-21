@@ -15,6 +15,10 @@ DEFAULT_SETTINGS = {
     "block_height": 25.0,
     "ground_z": None,
     "grip_offset": 0.0,
+    # true = คงมุมหมุนตอนหยิบไว้จนวางเสร็จ บล็อกจะวางตรงแนวเดิมไม่หมุนตามแขน
+    "keep_rotation": True,
+    # true = ลำดับที่ 3-4 แวะพักที่ temp ก่อน / false = หยิบจากช่องเดิมไปวาง Tower ตรงๆ
+    "use_temp": True,
     "order": [1, 2, 3, 4],
     "positions": {k: None for k in ("grid_1", "grid_8", "temp_top", "temp_last")},
 }
@@ -117,16 +121,19 @@ class Mover:
         if z < safe_z - 2.0:
             self.move(x, y, safe_z, r)
 
-    def pick_and_place(self, src, tgt, carry_z, empty_z):
+    def pick_and_place(self, src, tgt, carry_z, empty_z, keep_rotation=True):
         # ขาไปตัวเปล่า (ไม่มีบล็อก) เดินที่ empty_z, ขาถือบล็อกเดินที่ carry_z
         # ไม่ยกขึ้นหลังวาง: การยกครั้งถัดไป (lift) จะยกตรงไปที่ empty_z ของบล็อกถัดไปในครั้งเดียว
+        # keep_rotation: ใช้มุม r ตอนหยิบตลอดขาถือบล็อก บล็อกจึงวางลงตรงแนวเดิม
+        # (ถ้าใช้ r ของจุดปลายทาง บล็อกจะถูกหมุนไปเท่ากับมุมที่แขนกวาดไป)
+        r_place = src["r"] if keep_rotation else tgt["r"]
         self.lift(empty_z)
         self.move(src["x"], src["y"], empty_z, src["r"])
         self.move(src["x"], src["y"], src["z"], src["r"])
         self.suck(True, SUCK_DELAY_MS)
         self.move(src["x"], src["y"], carry_z, src["r"])
-        self.move(tgt["x"], tgt["y"], carry_z, tgt["r"])
-        self.move(tgt["x"], tgt["y"], tgt["z"], tgt["r"])
+        self.move(tgt["x"], tgt["y"], carry_z, r_place)
+        self.move(tgt["x"], tgt["y"], tgt["z"], r_place)
         self.suck(False, RELEASE_DELAY_MS)
         if self.prev_block is not None:
             self.d.wait_for_cmd(self.prev_block)
@@ -194,8 +201,40 @@ def ask_order(settings):
     return order
 
 
-def show_layout(settings):
-    """แสดงพิกัดที่คำนวณได้ทั้งหมด"""
+LAYOUT_DWELL_MS = 500   # ค้างที่แต่ละจุดตอนเดินตรวจตำแหน่ง
+
+
+def walk_layout(device, settings, grid, temps):
+    """เดินหัวดูดไปทีละจุด (1,2,3,4,c,5,6,7,8 แล้วต่อด้วย temp 1-4) ค้างจุดละ 0.5 วิ
+    เพื่อดูว่าพิกัดที่คำนวณไว้ตรงกับของจริงไหม"""
+    ground_z = settings.get("ground_z")
+    if ground_z is None:
+        print("❌ ยังไม่ได้ตั้ง Ground ([3]) เดินตรวจตำแหน่งไม่ได้")
+        return
+    block_h = settings.get("block_height", 25.0)
+    table_z = ground_z + block_h + settings.get("grip_offset", 0.0)
+    hover_z = safe_z_for(ground_z, block_h, 0, carrying=False)
+
+    stops = [(f"ช่อง {n}", grid[n]) for n in (1, 2, 3, 4, "c", 5, 6, 7, 8)]
+    stops += [(f"temp_{i}", temps[i]) for i in range(1, 5)] if temps else []
+    print(f"🚶 เดินตรวจ {len(stops)} จุด (ลงไปที่ระดับหยิบ {table_z:.2f} mm ค้างจุดละ "
+          f"{LAYOUT_DWELL_MS / 1000:.1f} วิ) — Ctrl+C เพื่อหยุด")
+
+    mover = Mover(device)
+    for label, p in stops:
+        print(f"   -> {label}: ({p['x']:.2f}, {p['y']:.2f}) r={p['r']:.2f}")
+        mover.lift(hover_z)
+        mover.move(p["x"], p["y"], hover_z, p["r"])
+        mover.move(p["x"], p["y"], table_z, p["r"])
+        mover.last = queued_wait(device, LAYOUT_DWELL_MS)
+        device.wait_for_cmd(mover.last)
+    mover.lift(hover_z)
+    mover.finish()
+    print("✅ เดินตรวจครบทุกจุดแล้ว")
+
+
+def show_layout(settings, device=None):
+    """แสดงพิกัดที่คำนวณได้ทั้งหมด และเลือกให้แขนเดินไล่ทุกจุดเพื่อตรวจได้"""
     grid = build_grid(settings["positions"])
     temps = build_temps(settings["positions"])
     if not grid:
@@ -212,6 +251,9 @@ def show_layout(settings):
     else:
         print("⚠️ ยังไม่ได้สอนจุดพัก (temp_top / temp_last)")
 
+    if device is not None and input("เดินตรวจตำแหน่งจริงด้วยแขนกลไหม? (y/n): ").strip().lower() == "y":
+        walk_layout(device, settings, grid, temps)
+
 
 # ==========================================
 # 🚀 RUN
@@ -220,8 +262,10 @@ def run_operation(device, settings):
     positions = settings["positions"]
     grid = build_grid(positions)
     temps = build_temps(positions)
-    if not grid or not temps:
-        print("❌ ยังสอนตำแหน่งไม่ครบ 4 จุด กรุณาใช้ [2] Teach ก่อน")
+    use_temp = settings.get("use_temp", True)
+    if not grid or (use_temp and not temps):
+        print("❌ ยังสอนตำแหน่งไม่ครบ กรุณาใช้ [2] Teach ก่อน"
+              + ("" if use_temp else " (โหมดปิด temp ต้องมีอย่างน้อย grid_1 กับ grid_8)"))
         return
     ground_z = settings.get("ground_z")
     if ground_z is None:
@@ -234,15 +278,21 @@ def run_operation(device, settings):
 
     block_h = settings.get("block_height", 25.0)
     grip = settings.get("grip_offset", 0.0)
+    keep_rot = settings.get("keep_rotation", True)
     table_z = ground_z + block_h + grip   # ระดับผิวบนของบล็อกที่วางบนโต๊ะ
     center = grid["c"]
 
-    # บล็อก 1-4 ต้องย้ายไปพักก่อน ใช้ช่องพักจาก 4 ไป 1 เพื่อป้องกันชน
+    # ลำดับที่ 3 และ 4 ต้องย้ายไปพักก่อนเสมอ (Tower สูง 2-3 ชั้นแล้ว เสี่ยงชนตอนเอื้อมข้าม)
+    # ลำดับที่ 1-2 ไม่ต้องพัก เพราะ Tower ยังสูงไม่เกิน 1 ชั้น
+    # ช่องพักไล่จาก 4 ไป 1 เพื่อไม่ให้ชนกันเอง / ปิดการพักได้ที่เมนู [7]
     staged = {}
     free_slots = [4, 3, 2, 1]
-    for b in order:
-        if b <= 4:
-            staged[b] = temps[free_slots.pop(0)]
+    if use_temp:
+        for i, b in enumerate(order):
+            if i >= 2:
+                staged[b] = temps[free_slots.pop(0)]
+    else:
+        print("⚠️ ปิดการใช้จุดพัก (temp) อยู่ — หยิบจากช่องเดิมไปวาง Tower ตรงๆ")
 
     plan = " -> ".join(f"{b}{'(พัก)' if b in staged else ''}" for b in order)
     print(f"\n🗒️ ลำดับ: {plan}")
@@ -259,7 +309,8 @@ def run_operation(device, settings):
     for b in order:
         if b in staged:
             print(f"📦 บล็อก {b} -> จุดพัก")
-            mover.pick_and_place(at(grid[b], table_z), at(staged[b], table_z), carry_z, empty_z)
+            mover.pick_and_place(at(grid[b], table_z), at(staged[b], table_z),
+                                 carry_z, empty_z, keep_rot)
 
     # Phase 2: สร้าง Tower ที่ช่องกลาง (c)
     for layer, b in enumerate(order):
@@ -268,7 +319,7 @@ def run_operation(device, settings):
         print(f"🏗️ บล็อก {b} -> Tower ชั้น {layer + 1}")
         mover.pick_and_place(at(src, table_z), at(center, tgt_z),
                              safe_z_for(ground_z, block_h, layer),
-                             safe_z_for(ground_z, block_h, layer, carrying=False))
+                             safe_z_for(ground_z, block_h, layer, carrying=False), keep_rot)
     mover.lift(safe_z_for(ground_z, block_h, len(order), carrying=False))
     mover.finish()
     print(f"🎉 สร้าง Tower เสร็จ {len(order)} ชั้น | ⏱️ {time.perf_counter() - start:.2f} sec")
@@ -312,6 +363,31 @@ def teach_mode(device, settings):
     show_layout(settings)
 
 
+def toggle_temp(settings):
+    """เปิด/ปิดการแวะพักที่ temp ของลำดับที่ 3-4"""
+    settings["use_temp"] = not settings.get("use_temp", True)
+    if settings["use_temp"]:
+        print("✅ เปิดการใช้จุดพัก: ลำดับที่ 3-4 จะแวะพักที่ temp ก่อน")
+    else:
+        print("⛔ ปิดการใช้จุดพัก: ทุกลำดับหยิบจากช่องเดิมไปวาง Tower ตรงๆ "
+              "(เสี่ยงชน Tower ตอนเอื้อมข้าม)")
+
+
+def reset_positions(settings):
+    """ล้างพิกัดที่สอนไว้ทั้งหมด (grid_1, grid_8, temp_top, temp_last) เพื่อเริ่มสอนใหม่
+    ค่าอื่น เช่น ground_z / ความเร็ว ไม่ถูกแตะ"""
+    filled = [k for k, v in settings["positions"].items() if v]
+    if not filled:
+        print("ℹ️ ยังไม่มีพิกัดที่บันทึกไว้ ไม่ต้องล้าง")
+        return
+    print(f"พิกัดที่มีอยู่ ({len(filled)}): {', '.join(filled)}")
+    if input("ล้างพิกัดทั้งหมดใช่ไหม? (y/n): ").strip().lower() != "y":
+        print("ยกเลิก")
+        return
+    settings["positions"] = {k: None for k in settings["positions"]}
+    print("🧹 ล้างพิกัดทั้งหมดแล้ว (กด [4] Save&Exit เพื่อเขียนลงไฟล์)")
+
+
 def set_ground(device, settings):
     input("👉 เลื่อนหัวดูดแตะพื้นโต๊ะ แล้วกด [Enter]...")
     settings["ground_z"] = round(device.get_pose().position.z, 2)
@@ -331,8 +407,10 @@ def main():
         raise SystemExit(1)
     try:
         while True:
+            temp_state = "ON" if settings.get("use_temp", True) else "OFF"
             choice = input(
-                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout [Enter]Exit > ").strip()
+                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
+                f"[6]ResetPositions [7]Temp:{temp_state} [Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
             elif choice == "2":
@@ -343,7 +421,11 @@ def main():
                 save_settings(settings)
                 break
             elif choice == "5":
-                show_layout(settings)
+                show_layout(settings, device)
+            elif choice == "6":
+                reset_positions(settings)
+            elif choice == "7":
+                toggle_temp(settings)
             elif choice == "":
                 break
     except KeyboardInterrupt:
