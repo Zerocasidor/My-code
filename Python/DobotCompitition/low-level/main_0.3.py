@@ -7,7 +7,7 @@ from pydobot import Dobot
 # ==========================================
 # ⚙️ CONFIGURATION & PERSISTENCE
 # ==========================================
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings(0.3-0.5).json")
 
 DEFAULT_SETTINGS = {
     "port": "/dev/ttyUSB0",

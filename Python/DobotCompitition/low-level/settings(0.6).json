@@ -1,0 +1,20 @@
+{
+    "port": "/dev/ttyUSB0",
+    "robot_speed": 100,
+    "robot_accel": 100,
+    "block_height": 25.0,
+    "ground_z": -64.35,
+    "grip_offset": 0.0,
+    "order": [
+        1,
+        2,
+        3,
+        4
+    ],
+    "positions": {
+        "grid_1": null,
+        "grid_8": null,
+        "temp_top": null,
+        "temp_bot": null
+    }
+}
