@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import glob
 import json
 import time
@@ -85,6 +86,8 @@ def connect_robot(settings):
             device = Dobot()
         except Exception as err:
             print(f"❌ เชื่อมต่อล้มเหลว: {err}")
+            if input("เปิดโหมดจำลอง (ไม่มีอะไรขยับจริง) แทนไหม? (y/n): ").strip().lower() == "y":
+                return FakeDobot()
             return None
     time.sleep(1.5)
     if hasattr(device, "clear_alarms"):
@@ -113,6 +116,68 @@ def emergency_stop(device):
         device._send_command(msg)
     device._set_queued_cmd_start_exec()
     device.suck(False)
+
+
+class FakePosition:
+    def __init__(self, x, y, z, r):
+        self.x, self.y, self.z, self.r = x, y, z, r
+
+
+class FakePose:
+    def __init__(self, position):
+        self.position = position
+
+
+class FakeDobot:
+    """โหมดจำลอง — ใช้ตอนไม่มีหุ่นต่ออยู่ ไม่มีอะไรขยับจริง
+    พิมพ์คำสั่งที่จะถูกส่งเข้าคิวออกมาแทน ตรวจลำดับ/พิกัด/กล้องได้ครบ
+    ยกเว้น [2] Teach กับ [3] SetGround ที่ต้องอ่านตำแหน่งจริงจากแขน"""
+
+    HOME = (200.0, 0.0, 0.0, 0.0)
+
+    def __init__(self):
+        self.pos = list(self.HOME)
+        self.index = 0
+
+    def _queue(self, text):
+        self.index += 1
+        print(f"   [จำลอง {self.index:3d}] {text}")
+        return self.index
+
+    def get_pose(self):
+        return FakePose(FakePosition(*self.pos))
+
+    def move_to(self, x, y, z, r, mode=None):
+        self.pos = [x, y, z, r]
+        return self._queue(f"move   x={x:7.2f}  y={y:7.2f}  z={z:7.2f}  r={r:7.2f}")
+
+    def suck(self, on):
+        return self._queue(f"suck   {'ON' if on else 'OFF'}")
+
+    def speed(self, *args):
+        pass
+
+    def wait_for_cmd(self, index):
+        pass
+
+    def close(self):
+        pass
+
+    # ให้ queued_wait / emergency_stop เรียกได้เหมือนของจริง
+    def _send_command(self, msg):
+        if msg.id == 110:
+            self._queue(f"wait   {struct.unpack('I', bytes(msg.params))[0]} ms")
+        return msg
+
+    def _extract_cmd_index(self, msg):
+        return self.index
+
+    def _set_queued_cmd_start_exec(self):
+        pass
+
+
+def is_sim(device):
+    return isinstance(device, FakeDobot)
 
 
 class Mover:
@@ -703,14 +768,19 @@ def set_ground(device, settings):
 
 def main():
     settings = load_settings()
-    device = connect_robot(settings)
+    # รันด้วย --sim เพื่อเข้าโหมดจำลองเลย โดยไม่ต้องแตะพอร์ตของหุ่น
+    device = FakeDobot() if "--sim" in sys.argv else connect_robot(settings)
     if not device:
         raise SystemExit(1)
+    if is_sim(device):
+        print("🧪 โหมดจำลอง: ไม่มีอะไรขยับจริง — ตรวจลำดับ/พิกัด/กล้องได้ "
+              "แต่ [2] Teach กับ [3] SetGround ใช้ไม่ได้")
     try:
         while True:
             temp_state = ",".join(map(str, settings.get("temp_orders", []))) or "OFF"
+            tag = "🧪SIM " if is_sim(device) else ""
             choice = input(
-                "\n[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
+                f"\n{tag}[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
                 f"[6]ResetPositions [7]Temp:{temp_state} [Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
@@ -719,9 +789,15 @@ def main():
             elif choice == "7":
                 configure_temp(settings)
             elif choice == "2":
-                teach_mode(device, settings)
+                if is_sim(device):
+                    print("❌ โหมดจำลองอ่านตำแหน่งจริงของแขนไม่ได้ — ต่อหุ่นก่อนถึงจะ Teach ได้")
+                else:
+                    teach_mode(device, settings)
             elif choice == "3":
-                set_ground(device, settings)
+                if is_sim(device):
+                    print("❌ โหมดจำลองอ่านตำแหน่งจริงของแขนไม่ได้ — ต่อหุ่นก่อนถึงจะตั้ง Ground ได้")
+                else:
+                    set_ground(device, settings)
             elif choice == "4":
                 save_settings(settings)
                 break
@@ -733,7 +809,8 @@ def main():
         print("\n🛑 หยุดฉุกเฉิน (Ctrl+C)")
     finally:
         try:
-            emergency_stop(device)
+            if not is_sim(device):
+                emergency_stop(device)
             device.close()
         except Exception:
             pass

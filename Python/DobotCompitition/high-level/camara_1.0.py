@@ -11,6 +11,7 @@
 """
 
 import os
+import glob
 import json
 import cv2 as cv
 import numpy as np
@@ -23,7 +24,9 @@ DRAW_BGR = {"g": (0, 220, 0), "r": (0, 0, 255), "y": (0, 220, 220), "b": (255, 1
 
 # ช่วง HSV ตั้งต้น (OpenCV: H 0-179, S/V 0-255) แดงมี 2 ช่วงเพราะ H วนรอบ 0
 DEFAULT_CONFIG = {
-    # เลข index หรือ path ก็ได้ path จาก /dev/v4l/by-id/ จะผูกกับตัวกล้อง ไม่สลับเวลาถอด-เสียบ USB
+    # กล้องที่อยากใช้ก่อน — เลข index หรือ path ก็ได้
+    # path จาก /dev/v4l/by-id/ จะผูกกับตัวกล้อง ไม่สลับเวลาถอด-เสียบ USB
+    # ถ้าเปิดตัวนี้ไม่ได้ (ไม่ได้เสียบกล้องเสริม) จะไล่หากล้องอื่นในเครื่องให้เอง เช่น กล้องโน้ตบุ๊ก
     "camera_index": 0,
     "warmup_frames": 25,    # ทิ้งเฟรมแรกๆ ระหว่างที่กล้องปรับแสง (C270 พ่นภาพดำช่วงแรก)
     "frame": {"cx": 320, "cy": 240, "w": 300, "h": 300},  # กรอบ 3x3 (ปรับกว้าง/สูงแยกกันได้)
@@ -157,17 +160,59 @@ def detect(frame, cfg, grown=None, centers=None):
     return blocks
 
 
+def _device_key(src):
+    """ใช้เทียบว่าเป็นกล้องตัวเดียวกันไหม (path กับ index อาจชี้ตัวเดียวกัน)"""
+    path = src if isinstance(src, str) else f"/dev/video{src}"
+    return os.path.realpath(path)
+
+
+def camera_candidates(cfg):
+    """ลำดับการลองเปิดกล้อง: ตัวที่ตั้งไว้ใน camera_index ก่อน
+    แล้วค่อยไล่กล้องอื่นที่มีในเครื่อง — ถ้าไม่ได้เสียบกล้องเสริม ก็จะตกมาที่กล้องโน้ตบุ๊กเอง"""
+    seen, out = set(), []
+    for src in ([cfg["camera_index"]]
+                + sorted(glob.glob("/dev/v4l/by-id/*-video-index0"))
+                + list(range(4))):
+        key = _device_key(src)
+        if key not in seen:
+            seen.add(key)
+            out.append(src)
+    return out
+
+
+def _quiet_opencv(on):
+    """ปิด warning ของ OpenCV ตอนไล่เปิดกล้องทีละตัว (ไม่งั้นรกเต็มจอ)"""
+    try:
+        from cv2.utils import logging as cvlog
+        lv = cvlog.getLogLevel()
+        cvlog.setLogLevel(cvlog.LOG_LEVEL_ERROR if on else lv)
+        return lv
+    except Exception:
+        return None
+
+
 def open_camera(cfg):
-    """เปิดกล้องจาก index หรือ path (path ใช้ backend V4L2 ตรงๆ)"""
-    src = cfg["camera_index"]
-    cam = cv.VideoCapture(src, cv.CAP_V4L2) if isinstance(src, str) else cv.VideoCapture(src)
-    if not cam.isOpened():
-        raise CameraError(f"cannot open camera: {src}")
-    return cam
+    """เปิดกล้องตัวแรกที่ใช้งานได้จริง (เปิดติด + อ่านภาพออก) คืน (cam, ที่มาที่ใช้จริง)"""
+    want = cfg["camera_index"]
+    prev, tried = _quiet_opencv(True), []
+    try:
+        for src in camera_candidates(cfg):
+            cam = cv.VideoCapture(src, cv.CAP_V4L2) if isinstance(src, str) else cv.VideoCapture(src)
+            if cam.isOpened() and cam.read()[0]:
+                if _device_key(src) != _device_key(want):
+                    print(f"⚠️ เปิดกล้องที่ตั้งไว้ ({want}) ไม่ได้ — ใช้ {src} แทน")
+                return cam, src
+            cam.release()
+            tried.append(str(src))
+    finally:
+        if prev is not None:
+            _quiet_opencv(False)
+    raise CameraError("cannot open any camera, tried: " + ", ".join(tried))
 
 
 def grab_frame(cfg):
-    cam = open_camera(cfg)
+    cam, src = open_camera(cfg)
+    print(f"📷 ใช้กล้อง: {src}")
     try:
         frame = None
         for _ in range(max(1, cfg.get("warmup_frames", 25))):
@@ -235,10 +280,14 @@ def draw_overlay(frame, cfg, blocks, note, centers=None):
 def setup():
     cfg = load_config()
     try:
-        cam = open_camera(cfg)
+        cam, src = open_camera(cfg)
     except CameraError as e:
         print(f"❌ {e}")
         return
+    print(f"📷 ใช้กล้อง: {src}")
+    if _device_key(src) != _device_key(cfg["camera_index"]):
+        print("   ⚠️ ไม่ใช่กล้องที่ตั้งไว้ — กรอบที่จัดตอนนี้จะตรงกับกล้องตัวนี้เท่านั้น")
+        print(f"   ถ้าจะใช้ตัวนี้ถาวร แก้ camera_index ใน camera_config.json เป็น {src!r}")
     mask_view = None      # None = ภาพปกติ, หรือชื่อสีเพื่อดูมาสก์
     colors = list(cfg["colors"])
     print("🖥️ จัดกรอบให้ตรงกับตาราง 3x3 แล้วกด k เพื่อบันทึก (q = ออก) — ข้อความบนหน้าต่างเป็นอังกฤษ")
