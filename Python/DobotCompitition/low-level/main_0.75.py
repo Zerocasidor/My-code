@@ -467,7 +467,7 @@ def valid_colors(colors):
     return colors
 
 
-def ask_input(settings, numbers_only=False):
+def ask_input(settings, numbers_only=False, enter_hint=None):
     """รับลำดับ 4 ตัว ได้ทั้ง 'เลขช่อง' (1-8 ไม่ซ้ำ) และ 'สี' (g/r/y/b ซ้ำได้ไม่เกินสีละ 2)
     คืน ("order", [ช่อง...]) หรือ ("colors", [สี...]) หรือ None"""
     # 0.75: โหมด numbers_only (fallback ตอนกล้องพัง) ต้องเสนอ "ลำดับเลข" เป็นค่าเริ่มต้น
@@ -477,7 +477,7 @@ def ask_input(settings, numbers_only=False):
     legend = ", ".join(f"{k}={v}" for k, v in COLORS.items())
     prompt = ("ลำดับ 4 ตัว — เลขช่อง 1-8 เช่น '3 5 8 2'"
               + ("" if numbers_only else f" หรือสี ({legend}) เช่น 'g r y b'")
-              + f" [{cur}] (Enter=ค่าเดิม): ")
+              + f" [{cur}] ({enter_hint or 'Enter=ค่าเดิม'}): ")
     tokens = (input(prompt).strip().lower() or cur).replace(",", " ").split()
 
     if tokens and all(t.isdigit() for t in tokens):
@@ -563,8 +563,43 @@ def get_order(settings, grid):
     return answer[1] if answer else None
 
 
-def show_layout(settings):
-    """แสดงพิกัดที่คำนวณได้ทั้งหมด"""
+LAYOUT_DWELL_MS = 500   # ค้างที่แต่ละจุดตอนเดินตรวจตำแหน่ง
+
+
+def walk_layout(device, settings, grid, temps):
+    """เดินหัวดูดไปทีละจุด (1,2,3,4,c,5,6,7,8 แล้วต่อด้วย temp 1-4) ค้างจุดละ 0.5 วิ
+    เพื่อดูว่าพิกัดที่คำนวณไว้ตรงกับของจริงไหม"""
+    ground_z = settings.get("ground_z")
+    if ground_z is None:
+        print("❌ ยังไม่ได้ตั้ง Ground ([3]) เดินตรวจตำแหน่งไม่ได้")
+        return
+    block_h = settings.get("block_height", 25.0)
+    grip = settings.get("grip_offset", 0.0)
+    fallback_top = ground_z + block_h          # ใช้เมื่อฟิตระนาบไม่ได้ (ข้อมูลเก่าไม่มี z)
+    base_z = grid["c"].get("z", fallback_top) - block_h
+    hover_z = safe_z_for(base_z, block_h, 0, carrying=False)
+
+    stops = [(f"ช่อง {n}", grid[n]) for n in (1, 2, 3, 4, "c", 5, 6, 7, 8)]
+    stops += [(f"temp_{i}", temps[i]) for i in range(1, 5)] if temps else []
+    print(f"🚶 เดินตรวจ {len(stops)} จุด (ลงไปแตะผิวบนบล็อกของแต่ละจุด ค้างจุดละ "
+          f"{LAYOUT_DWELL_MS / 1000:.1f} วิ) — Ctrl+C เพื่อหยุด")
+
+    mover = Mover(device)
+    for label, p in stops:
+        table_z = p.get("z", fallback_top) + grip
+        print(f"   -> {label}: ({p['x']:.2f}, {p['y']:.2f}) z={table_z:.2f} r={p['r']:.2f}")
+        mover.lift(hover_z)
+        mover.move(p["x"], p["y"], hover_z, p["r"])
+        mover.move(p["x"], p["y"], table_z, p["r"])
+        mover.last = queued_wait(device, LAYOUT_DWELL_MS)
+        device.wait_for_cmd(mover.last)
+    mover.lift(hover_z)
+    mover.finish()
+    print("✅ เดินตรวจครบทุกจุดแล้ว")
+
+
+def show_layout(settings, device=None):
+    """แสดงพิกัดที่คำนวณได้ทั้งหมด และเลือกให้แขนเดินไล่ทุกจุดเพื่อตรวจได้ (ยกมาจาก main_0.6)"""
     grid = build_grid(settings["positions"])
     temps = build_temps(settings["positions"], settings.get("block_height", 25.0))
     if not grid:
@@ -592,6 +627,15 @@ def show_layout(settings):
             print(f"   temp_{i}: ({temps[i]['x']:7.2f},{temps[i]['y']:7.2f}) r={temps[i]['r']:6.2f}{z}")
     else:
         print("⚠️ ยังไม่ได้สอนจุดพัก (temp_top / temp_last)")
+
+    if device is None:
+        return
+    if warn and warn[1]:
+        # ด่านเดียวกับ [1] Run — ห้ามเอาแขนลงไปตามค่า z ที่รู้อยู่แล้วว่าผิด
+        print("⛔ ไม่เดินตรวจด้วยแขนจริง เพราะข้อมูล z ยังไม่ถูกต้อง (ดูข้อความข้างบน)")
+        return
+    if input("เดินตรวจตำแหน่งจริงด้วยแขนกลไหม? (y/n): ").strip().lower() == "y":
+        walk_layout(device, settings, grid, temps)
 
 
 # ==========================================
@@ -757,6 +801,37 @@ def configure_temp(settings):
     print(f"✅ ลำดับที่จะแวะพักที่ temp: {', '.join(map(str, picked))}")
 
 
+def unsaved_changes(settings):
+    """ค่าที่ถืออยู่ในโปรแกรมต่างจากในไฟล์ไหม (เทียบกับผลของ load_settings() เพื่อให้รูปแบบตรงกัน)
+    เมนูและ [8] ใช้ตัวนี้บอกว่ากด Enter แล้วจะ Save หรือ Exit"""
+    try:
+        return settings != load_settings()
+    except Exception:
+        return True
+
+
+def save_order(settings):
+    """[8] กรอกลำดับแล้วบันทึกลงไฟล์ทันที (ไม่ต้องออกโปรแกรม)
+    - กรอกเป็นเลข 1-8 -> เก็บเป็น "ลำดับเลข" ตอนรันใช้ช่องนั้นตรงๆ ไม่แตะกล้อง
+    - กรอกเป็นสี g/r/y/b -> เก็บเป็น "ลำดับสี" ตอนรันจะถามกล้องว่าสีไหนอยู่ช่องไหน
+    - กด Enter เฉยๆ -> ใช้ค่าเดิมที่ค้างอยู่ แล้วบันทึก"""
+    answer = ask_input(settings,
+                       enter_hint="Enter=Save" if unsaved_changes(settings) else "Enter=Exit")
+    if not answer:
+        print("↩️ ยังไม่บันทึก (ลำดับไม่ถูกต้อง)")
+        return
+    if not unsaved_changes(settings):
+        print("ℹ️ ค่าในโปรแกรมตรงกับในไฟล์อยู่แล้ว ไม่ต้องบันทึกซ้ำ")
+        return
+    kind, value = answer
+    if kind == "order":
+        print(f"🔢 ลำดับเลข: {' '.join(str(b) for b in value)} — ตอนรันใช้ช่องนี้ตรงๆ ไม่ใช้กล้อง")
+    else:
+        names = ", ".join(COLORS[c] for c in value)
+        print(f"🎨 ลำดับสี: {' '.join(value)} ({names}) — ตอนรันจะถามกล้องว่าสีไหนอยู่ช่องไหน")
+    save_settings(settings)
+
+
 def reset_positions(settings):
     """ล้างพิกัดที่สอนไว้ทั้งหมด (มุมกริด 4 จุด + จุดพัก 2 จุด) เพื่อเริ่มสอนใหม่
     ค่าอื่น เช่น ground_z / ความเร็ว ไม่ถูกแตะ"""
@@ -796,10 +871,20 @@ def main():
     try:
         while True:
             temp_state = ",".join(map(str, settings.get("temp_orders", []))) or "OFF"
+            # โชว์ลำดับที่บันทึกไว้ และถ้าอยู่โหมดสี ให้โชว์ "เลขสำรอง" (settings["order"]) ด้วย
+            # เพราะตอนกล้องพัง fallback จะเสนอชุดเลขนี้ ถ้ามันเก่าจะได้เห็นตั้งแต่ตอนตั้งค่า
+            # ไม่ใช่ไปเจอตอนกดดันที่สุด (ลำดับเลขผิดจะรันจนจบโดยไม่ error)
+            numbers = " ".join(str(b) for b in settings.get("order", []))
+            primary = settings.get("last_input") or numbers
+            is_colors = bool(primary) and not primary.replace(" ", "").isdigit()
+            backup = ((f" (เลขสำรอง {numbers})" if numbers else " (ยังไม่มีเลขสำรอง)")
+                      if is_colors else "")
+            dirty = " ⚠️ยังไม่บันทึก" if unsaved_changes(settings) else ""
             tag = "🧪SIM " if is_sim(device) else ""
             choice = input(
-                f"\n{tag}[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout "
-                f"[6]ResetPositions [7]Temp:{temp_state} [Enter]Exit > ").strip()
+                f"\n{tag}[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout\n"
+                f"[6]ResetPositions [7]Temp:{temp_state} [8]Order:{primary or '-'}{backup}"
+                f"{dirty} [Enter]Exit > ").strip()
             if choice == "1":
                 run_operation(device, settings)
             elif choice == "6":
@@ -820,7 +905,9 @@ def main():
                 save_settings(settings)
                 break
             elif choice == "5":
-                show_layout(settings)
+                show_layout(settings, device)
+            elif choice == "8":
+                save_order(settings)
             elif choice == "":
                 break
     except KeyboardInterrupt:
