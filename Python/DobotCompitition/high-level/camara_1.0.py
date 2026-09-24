@@ -30,7 +30,9 @@ DEFAULT_CONFIG = {
     "camera_index": 0,
     "warmup_frames": 25,    # ทิ้งเฟรมแรกๆ ระหว่างที่กล้องปรับแสง (C270 พ่นภาพดำช่วงแรก)
     "frame": {"cx": 320, "cy": 240, "w": 300, "h": 300},  # กรอบ 3x3 (ปรับกว้าง/สูงแยกกันได้)
-    "min_area": 400,        # พื้นที่ต่ำสุดที่นับเป็นบล็อก (พิกเซล)
+    # พื้นที่ต่ำสุดที่นับเป็นบล็อก คิดเป็น "สัดส่วนของ 1 ช่อง" ไม่ใช่พิกเซลตายตัว
+    # กรอบใหญ่ขึ้น (ซูมเข้า / กล้องใกล้ขึ้น) บล็อกในภาพก็ใหญ่ขึ้นตาม เกณฑ์จึงโตตามไปเอง
+    "min_area_ratio": 0.04,
     "expand_limit": 6,      # ขยาย range ได้กี่ครั้งก่อนจะฟ้อง no color block
     "colors": {
         "g": {"h": [[40, 85]], "s": [80, 255], "v": [60, 255]},
@@ -52,6 +54,7 @@ class CameraError(Exception):
 
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    data = {}
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -61,7 +64,26 @@ def load_config():
         pass
     except Exception as e:
         print(f"⚠️ อ่าน camera_config.json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
+    # ไฟล์เก่าเก็บ min_area เป็นพิกเซลตายตัว -> แปลงเป็นสัดส่วนของช่องตามกรอบที่เซฟไว้ตอนนั้น
+    old = cfg.pop("min_area", None)
+    if old is not None and "min_area_ratio" not in data:
+        cw, ch = cell_size(cfg)
+        cfg["min_area_ratio"] = round(old / (cw * ch), 4)
+        print(f"ℹ️ แปลง min_area {old} px -> min_area_ratio {cfg['min_area_ratio']} "
+              f"(ช่องตอนนั้นขนาด {cw:.0f}x{ch:.0f} px)")
     return cfg
+
+
+def cell_size(cfg):
+    """ขนาด 1 ช่องของตาราง 3x3 (พิกเซล)"""
+    _, _, w, h = grid_rect(cfg)
+    return w / 3.0, h / 3.0
+
+
+def min_area_of(cfg):
+    """พื้นที่ต่ำสุดที่นับเป็นบล็อก (พิกเซล) = สัดส่วนที่ตั้งไว้ x พื้นที่ 1 ช่อง"""
+    cw, ch = cell_size(cfg)
+    return max(50, int(cfg.get("min_area_ratio", 0.04) * cw * ch))
 
 
 def save_config(cfg):
@@ -109,28 +131,63 @@ def cell_of(cfg, px, py):
     return CELL_AT[(row, col)]
 
 
+def scan_color(hsv, cfg, color, grow=0):
+    """สแกนสีหนึ่งที่ระดับการขยาย range = grow (ไม่บังคับว่าต้องเจอกี่ก้อน)
+    คืน (ในกรอบ {ช่อง: (พื้นที่, จุดกึ่งกลาง)}, นอกกรอบ [จุดกึ่งกลาง, ...])"""
+    mask = color_mask(hsv, cfg["colors"][color], grow)
+    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    min_area = min_area_of(cfg)
+    inside, outside = {}, []
+    for cnt in contours:
+        area = cv.contourArea(cnt)
+        if area < min_area:
+            continue
+        m = cv.moments(cnt)
+        if m["m00"] == 0:
+            continue
+        px, py = int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])
+        cell = cell_of(cfg, px, py)
+        if cell is None or cell == "c":   # นอกกรอบ / ช่องกลาง -> ตัดทิ้ง
+            outside.append((px, py))
+            continue
+        if area > inside.get(cell, (0,))[0]:
+            inside[cell] = (area, (px, py))
+    return inside, outside
+
+
+def preview(frame, cfg):
+    """ตรวจแบบหลวมสำหรับ UI ตั้งกรอบ — ไม่บังคับว่าต้องเจอสีละ 2 ก้อน
+    เจอกี่ก้อนก็โชว์เท่านั้น จะได้เห็นว่ากล้อง "เห็น" สีนั้นแล้วหรือยัง
+    และก้อนที่ตกนอกกรอบก็โชว์ด้วย (ของจริงใน get_blocks จะถูกตัดทิ้ง)
+    คืน (blocks, centers, outside, note)"""
+    hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+    blocks, areas, centers, outside, counts = {}, {}, {}, [], []
+    for color in cfg["colors"]:
+        found, out = scan_color(hsv, cfg, color, 0)
+        counts.append((color, len(found)))
+        outside += [(color, p) for p in out]
+        for cell, (area, center) in found.items():
+            if area <= areas.get(cell, 0):
+                continue          # ช่องเดียวกันเจอ 2 สี -> เอาก้อนที่ใหญ่กว่า
+            blocks[cell], areas[cell], centers[cell] = color, area, center
+    ready = all(n == 2 for _, n in counts)
+    note = ("READY " if ready else "found ") + " ".join(f"{c}={n}" for c, n in counts)
+    if not ready:
+        note += " (need 2 each)"
+    if outside:
+        note += f" | {len(outside)} outside grid"
+    return blocks, centers, outside, (
+        note + f" | min_area={min_area_of(cfg)}px"
+        f" ({cfg.get('min_area_ratio', 0.04) * 100:.1f}% of cell)")
+
+
 def find_color(hsv, cfg, color):
     """หาบล็อกของสีหนึ่งให้ได้ 2 ก้อน ขยาย range ทีละขั้นจนกว่าจะเจอ
     คืน [(ช่อง, พื้นที่, จุดกึ่งกลาง), ...] 2 ตัว หรือโยน CameraError"""
-    spec = cfg["colors"][color]
     name = COLOR_NAMES.get(color, color)
+    found = {}
     for grow in range(cfg["expand_limit"] + 1):
-        mask = color_mask(hsv, spec, grow)
-        contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-        found = {}
-        for cnt in contours:
-            area = cv.contourArea(cnt)
-            if area < cfg["min_area"]:
-                continue
-            m = cv.moments(cnt)
-            if m["m00"] == 0:
-                continue
-            px, py = m["m10"] / m["m00"], m["m01"] / m["m00"]
-            cell = cell_of(cfg, px, py)
-            if cell is None or cell == "c":   # นอกกรอบ / ช่องกลาง -> ตัดทิ้ง
-                continue
-            if area > found.get(cell, (0,))[0]:
-                found[cell] = (area, (int(px), int(py)))
+        found, _ = scan_color(hsv, cfg, color, grow)
         if len(found) > 2:
             raise CameraError(f"over color block: {color} ({name}) found {len(found)} "
                               f"at cells {sorted(found)} (need 2)")
@@ -240,10 +297,10 @@ def get_blocks():
 # 🖥️ UI ตั้งกรอบ 3x3 (รันไฟล์นี้ตรงๆ)
 # ==========================================
 HELP = ["w/a/s/d = move grid", "+/- (or z/x) = zoom grid", "t/g = taller/shorter",
-        "f/h = wider/narrower", "[ / ] = min_area", "m = mask view", "k = SAVE", "q = quit"]
+        "f/h = wider/narrower", "[ / ] = min area %", "m = mask view", "k = SAVE", "q = quit"]
 
 
-def draw_overlay(frame, cfg, blocks, note, centers=None):
+def draw_overlay(frame, cfg, blocks, note, centers=None, outside=None):
     x0, y0, w, h = grid_rect(cfg)
     sx, sy = w // 3, h // 3
     cv.rectangle(frame, (x0, y0), (x0 + w, y0 + h), (255, 255, 255), 2)
@@ -270,6 +327,12 @@ def draw_overlay(frame, cfg, blocks, note, centers=None):
         cv.drawMarker(frame, (px, py), (255, 255, 255), cv.MARKER_CROSS, 14, 3)
         cv.circle(frame, (px, py), 5, bgr, -1)
         cv.circle(frame, (px, py), 5, (255, 255, 255), 1)
+    # ก้อนที่เจอแต่อยู่นอกกรอบ 3x3 (ของจริงจะถูกตัดทิ้ง) โชว์ให้เห็นว่ากล้องเห็นแต่กรอบไม่ครอบ
+    for color, (px, py) in (outside or []):
+        bgr = DRAW_BGR.get(color, (150, 150, 150))
+        cv.drawMarker(frame, (px, py), bgr, cv.MARKER_TILTED_CROSS, 16, 2)
+        cv.putText(frame, f"{color} out", (px + 10, py + 4),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.45, bgr, 1)
     for i, line in enumerate(HELP):
         cv.putText(frame, line, (10, 20 + 18 * i), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     cv.putText(frame, note, (10, frame.shape[0] - 12), cv.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -296,14 +359,9 @@ def setup():
         if not ok:
             print("❌ อ่านภาพจากกล้องไม่ได้")
             break
-        grown, centers = {}, {}
-        try:
-            blocks = detect(frame, cfg, grown, centers)
-            note = "OK: " + " ".join(f"{c}={blocks[c]}" for c in sorted(blocks))
-            if grown:
-                note += "  | ขยาย range: " + " ".join(f"{c}+{n}" for c, n in grown.items())
-        except CameraError as e:
-            blocks, centers, note = {}, {}, str(e)
+        # ใช้ preview (หลวม) ไม่ใช่ detect (เข้มงวด) เพราะระหว่างจัดกรอบ
+        # มักยังวางบล็อกไม่ครบสีละ 2 ก้อน ถ้าใช้ detect จะโยน error แล้วไม่โชว์อะไรเลย
+        blocks, centers, outside, note = preview(frame, cfg)
 
         if mask_view:
             hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
@@ -311,7 +369,8 @@ def setup():
             note = f"[mask {mask_view}] " + note
         else:
             view = frame.copy()
-        cv.imshow("camara setup (3x3)", draw_overlay(view, cfg, blocks, note, centers))
+        cv.imshow("camara setup (3x3)",
+                  draw_overlay(view, cfg, blocks, note, centers, outside))
 
         key = cv.waitKey(30) & 0xFF
         f = cfg["frame"]
@@ -340,9 +399,9 @@ def setup():
         elif key == ord("h"):
             f["w"] = max(30, f["w"] - 6)
         elif key == ord("["):
-            cfg["min_area"] = max(50, cfg["min_area"] - 50)
+            cfg["min_area_ratio"] = round(max(0.002, cfg.get("min_area_ratio", 0.04) - 0.005), 4)
         elif key == ord("]"):
-            cfg["min_area"] += 50
+            cfg["min_area_ratio"] = round(min(0.5, cfg.get("min_area_ratio", 0.04) + 0.005), 4)
         elif key == ord("m"):
             idx = -1 if mask_view is None else colors.index(mask_view)
             mask_view = colors[idx + 1] if idx + 1 < len(colors) else None
