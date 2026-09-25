@@ -1,25 +1,24 @@
-"""camara_2.0 — ตรวจสีบล็อกในตาราง 3x3 แบบยืดหยุ่น (ต่อจาก camara_1.0)
+"""camara_2.0 - flexible 3x3 block colour detection.
 
-เรียกจากโปรแกรมอื่น:  get_blocks() -> {ช่อง: สี} เช่น {1: "g", 2: "r", ...} ครบทุกช่อง
-ตั้งค่ากรอบ/สี (UI):   python3 camara_2.0.py
+From another program:  get_blocks() -> {cell: color}, e.g. {1: "g", 2: "r", ...}, all 8 cells
+Frame/colour setup UI:  python3 camara_2.0.py
 
-ต่างจาก 1.0:
-- สีเดียวกันซ้ำกี่ก้อนก็ได้ ไม่มี over/no color block อีกแล้ว (1.0 บังคับสีละ 2 ก้อนเป๊ะ)
-- มองทีละ "ช่อง" แทนที่จะมองทีละ "สี" -> แต่ละช่องสรุปสีของตัวเอง
-- ช่องที่มีหลายสีปนกัน -> เอาสีที่มีพิกเซลมากที่สุด
+Difference from 1.0: it looks at one CELL at a time instead of one COLOUR at a time,
+so a colour may repeat any number of times and a cell with mixed colours is decided
+by pixel count. No over/no-color-block errors any more.
 
-ระบบสำรอง (ใช้ต่อเมื่อ "หาสีไม่เจอ" จริงๆ เท่านั้น ไล่จากหลักฐานมากไปน้อย):
-    1. เจอสีถึงเกณฑ์ตั้งแต่ range ปกติ          -> sure  (ปกติควรได้ทุกช่องแบบนี้)
-    2. ไม่ถึงเกณฑ์ -> ขยาย HSV range ทีละขั้น    -> sure  (grow > 0)
-    3. ขยายจนสุดแล้วยังไม่ถึงเกณฑ์ แต่ยังพอมีพิกเซลของสีอยู่บ้าง -> เอาสีที่มีมากสุด (weak)
-    4. ไม่เหลือพิกเซลของสีไหนเลย -> เดาจาก H เฉลี่ยของช่อง เอาสีที่ใกล้ที่สุด (hue)
-ข้อ 3-4 คือการเดา จะถูกทำเครื่องหมายไว้ทั้งบนหน้าจอและตอนรันจริง
+Fallback ladder, used only when a colour really cannot be found:
+    1. colour passes min_area at the normal range        -> sure  (reason "found")
+    2. passes only after widening the HSV range          -> sure  (reason "grow")
+    3. never passes but some pixels remain               -> guess (reason "weak")
+    4. no pixels at all, nearest colour by mean hue      -> guess (reason "hue")
+Guesses are marked in the window and reported at run time.
 
-หมายเลขช่องเป็นมุมมอง "ภาพกล้อง" เสมอ (ซ้าย->ขวา, บน->ล่าง):
+Cell numbers are always in CAMERA view (left->right, top->bottom):
     1 2 3
     4 c 5
     6 7 8
-ฝั่ง main_0.7 เป็นคนกลับด้าน 180° เองถ้าตั้ง flip_camera ไว้
+main flips the view 180 itself when flip_camera is set.
 """
 
 import os
@@ -31,23 +30,23 @@ import numpy as np
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_config.json")
 
-# ข้อความที่ขึ้นบนหน้าต่าง OpenCV ต้องเป็นอังกฤษ (putText วาดภาษาไทยไม่ได้ จะขึ้นเป็น ???)
+# OpenCV putText cannot draw Thai, so all on-window text is English
 COLOR_NAMES = {"g": "green", "r": "red", "y": "yellow", "b": "blue"}
 DRAW_BGR = {"g": (0, 220, 0), "r": (0, 0, 255), "y": (0, 220, 220), "b": (255, 150, 0)}
 
-# ช่วง HSV ตั้งต้น (OpenCV: H 0-179, S/V 0-255) แดงมี 2 ช่วงเพราะ H วนรอบ 0
+# Default HSV ranges (OpenCV: H 0-179, S/V 0-255). Red needs 2 ranges, H wraps at 0.
 DEFAULT_CONFIG = {
-    # กล้องที่อยากใช้ก่อน — เลข index หรือ path ก็ได้
-    # path จาก /dev/v4l/by-id/ จะผูกกับตัวกล้อง ไม่สลับเวลาถอด-เสียบ USB
-    # ถ้าเปิดตัวนี้ไม่ได้ (ไม่ได้เสียบกล้องเสริม) จะไล่หากล้องอื่นในเครื่องให้เอง เช่น กล้องโน้ตบุ๊ก
+    # Preferred camera: index or path. A /dev/v4l/by-id/ path sticks to one device.
+    # If it cannot be opened, the other cameras are tried (e.g. the built-in one).
     "camera_index": 0,
-    "warmup_frames": 25,    # ทิ้งเฟรมแรกๆ ระหว่างที่กล้องปรับแสง (C270 พ่นภาพดำช่วงแรก)
-    "frame": {"cx": 320, "cy": 240, "w": 300, "h": 300},  # กรอบ 3x3 (ปรับกว้าง/สูงแยกกันได้)
-    # พื้นที่ต่ำสุดที่นับว่า "เจอสีนั้นจริง" ในหนึ่งช่อง คิดเป็นสัดส่วนของพื้นที่ 1 ช่อง
-    # กรอบใหญ่ขึ้น (ซูมเข้า / กล้องใกล้ขึ้น) บล็อกในภาพก็ใหญ่ขึ้นตาม เกณฑ์จึงโตตามไปเอง
+    "warmup_frames": 25,    # drop the first frames while exposure settles
+    "frame": {"cx": 320, "cy": 240, "w": 300, "h": 300},  # 3x3 frame
+    # Smallest area counted as "colour found", as a fraction of one cell,
+    # so the threshold scales with the frame instead of being fixed pixels.
     "min_area_ratio": 0.04,
-    "cell_inset": 0.15,     # หดขอบช่องเข้ามาข้างละกี่ส่วน กันสีช่องข้างๆ กับเส้นตารางล้นเข้ามา
-    "expand_limit": 6,      # ขยาย range ได้กี่ขั้นก่อนจะยอมเดาสีที่ใกล้ที่สุด
+    "cell_inset": 0.15,     # shrink each cell edge to keep neighbours and grid lines out
+    "expand_limit": 6,      # range-widening steps before guessing
+    "rotation": 0,          # cell numbering turned 90 deg CW this many times (r in the UI)
     "colors": {
         "g": {"h": [[40, 85]], "s": [80, 255], "v": [60, 255]},
         "r": {"h": [[0, 10], [170, 179]], "s": [90, 255], "v": [60, 255]},
@@ -56,7 +55,7 @@ DEFAULT_CONFIG = {
     },
 }
 
-# ช่อง (แถว, คอลัมน์) ตามมุมมองภาพ ช่องกลาง (1,1) คือจุดสร้าง Tower ไม่นับเป็นบล็อก
+# (row, col) in camera view; the centre (1,1) is the tower spot, not a block
 CELL_AT = {(0, 0): 1, (0, 1): 2, (0, 2): 3,
            (1, 0): 4, (1, 1): "c", (1, 2): 5,
            (2, 0): 6, (2, 1): 7, (2, 2): 8}
@@ -64,9 +63,24 @@ CELL_POS = {cell: pos for pos, cell in CELL_AT.items()}
 BLOCK_CELLS = [c for c in (1, 2, 3, 4, 5, 6, 7, 8)]
 
 
+def cell_at(cfg):
+    """(row, col) -> cell number, with the numbering turned 90 deg CW `rotation` times.
+    Only the labels move; the boxes on screen stay where they are."""
+    out = {}
+    for (row, col), cell in CELL_AT.items():
+        for _ in range(cfg.get("rotation", 0) % 4):
+            row, col = col, 2 - row
+        out[(row, col)] = cell
+    return out
+
+
+def cell_pos(cfg):
+    """cell number -> (row, col), honouring rotation."""
+    return {cell: pos for pos, cell in cell_at(cfg).items()}
+
+
 class CameraError(Exception):
-    """เปิด/อ่านกล้องไม่สำเร็จ — ฝั่ง main จะจับ error นี้แล้วให้กรอกลำดับเอง
-    (2.0 ไม่โยน error เรื่องสีอีกแล้ว ทุกช่องได้สีเสมอ)"""
+    """Camera could not be opened or read. 2.0 never raises for colours."""
 
 
 def load_config():
@@ -76,26 +90,25 @@ def load_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         cfg.update({k: v for k, v in data.items() if k != "colors"})
-        # merge ทีละสี ไม่ใช่ update ทั้ง dict — ไฟล์ที่ตั้งมาแค่บางคีย์ (เช่นปรับแต่ h)
-        # จะได้ไม่ทำให้ s/v หายไปทั้งคู่ แล้วไป KeyError ตอนสร้างมาสก์
+        # merge per colour, so a file that sets only h keeps s/v
         for name, spec in (data.get("colors") or {}).items():
             if isinstance(spec, dict):
                 cfg["colors"].setdefault(name, {}).update(spec)
         for name in [n for n, spec in cfg["colors"].items()
                      if not all(k in spec for k in ("h", "s", "v"))]:
-            print(f"⚠️ สี '{name}' ใน camera_config.json ขาดคีย์ h/s/v — ข้ามสีนี้ไป")
+            print(f"! colour '{name}' in camera_config.json has no h/s/v, skipped")
             cfg["colors"].pop(name)
     except FileNotFoundError:
         pass
     except Exception as e:
-        print(f"⚠️ อ่าน camera_config.json ไม่ได้ ({e}) ใช้ค่าเริ่มต้น")
-    # ไฟล์เก่าเก็บ min_area เป็นพิกเซลตายตัว -> แปลงเป็นสัดส่วนของช่องตามกรอบที่เซฟไว้ตอนนั้น
+        print(f"! cannot read camera_config.json ({e}), using defaults")
+    # legacy min_area in pixels -> ratio, using the frame saved with it
     old = cfg.pop("min_area", None)
     if old is not None and "min_area_ratio" not in data:
         cw, ch = cell_size(cfg)
         cfg["min_area_ratio"] = round(old / (cw * ch), 4)
-        print(f"ℹ️ แปลง min_area {old} px -> min_area_ratio {cfg['min_area_ratio']} "
-              f"(ช่องตอนนั้นขนาด {cw:.0f}x{ch:.0f} px)")
+        print(f"min_area {old} px -> min_area_ratio {cfg['min_area_ratio']} "
+              f"(cell was {cw:.0f}x{ch:.0f} px)")
     return cfg
 
 
@@ -103,16 +116,16 @@ def save_config(cfg):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
-        print("💾 บันทึก camera_config.json แล้ว")
+        print("saved camera_config.json")
     except Exception as e:
-        print(f"❌ บันทึกไม่สำเร็จ: {e}")
+        print(f"! save failed: {e}")
 
 
 # ==========================================
-# 📐 กรอบตาราง
+# grid
 # ==========================================
 def grid_rect(cfg):
-    """มุมซ้ายบน + กว้าง/สูง ของกรอบ 3x3"""
+    """Top-left corner plus width/height of the 3x3 frame."""
     f = cfg["frame"]
     w = f.get("w", f.get("size", 300))
     h = f.get("h", f.get("size", 300))
@@ -120,21 +133,21 @@ def grid_rect(cfg):
 
 
 def cell_size(cfg):
-    """ขนาด 1 ช่องของตาราง 3x3 (พิกเซล)"""
+    """Size of one cell in pixels."""
     _, _, w, h = grid_rect(cfg)
     return w / 3.0, h / 3.0
 
 
 def min_area_of(cfg):
-    """พื้นที่ต่ำสุดที่นับว่าเจอสีนั้นจริง (พิกเซล) = สัดส่วนที่ตั้งไว้ x พื้นที่ 1 ช่อง"""
+    """Minimum area in pixels = ratio x cell area."""
     cw, ch = cell_size(cfg)
     return max(50, int(cfg.get("min_area_ratio", 0.04) * cw * ch))
 
 
 def cell_rect(cfg, cell):
-    """กรอบของช่องหนึ่ง หดขอบเข้ามาตาม cell_inset กันสีช่องข้างๆ ล้นเข้ามา"""
+    """One cell box, shrunk by cell_inset to keep neighbours out."""
     x0, y0, w, h = grid_rect(cfg)
-    row, col = CELL_POS[cell]
+    row, col = cell_pos(cfg)[cell]
     sx, sy = w / 3.0, h / 3.0
     inset = cfg.get("cell_inset", 0.15)
     mx, my = sx * inset, sy * inset
@@ -143,7 +156,7 @@ def cell_rect(cfg, cell):
 
 
 def cell_roi(hsv, cfg, cell):
-    """ภาพ HSV เฉพาะในช่องนั้น (ตัดตามขอบภาพให้ด้วย) คืน (roi, x0, y0)"""
+    """HSV crop of one cell, clipped to the image. Returns (roi, x0, y0)."""
     x, y, w, h = cell_rect(cfg, cell)
     H, W = hsv.shape[:2]
     x0, y0 = max(0, x), max(0, y)
@@ -154,10 +167,10 @@ def cell_roi(hsv, cfg, cell):
 
 
 # ==========================================
-# 🎯 ตรวจสี
+# colour detection
 # ==========================================
 def color_mask(hsv, spec, grow=0):
-    """มาสก์ของสีหนึ่ง grow = จำนวนครั้งที่ขยาย range (0 = ช่วงตั้งต้น)"""
+    """Mask of one colour; grow = range-widening steps (0 = as configured)."""
     s_lo = max(30, spec["s"][0] - 15 * grow)
     v_lo = max(30, spec["v"][0] - 15 * grow)
     mask = None
@@ -172,7 +185,7 @@ def color_mask(hsv, spec, grow=0):
 
 
 def hue_gap(hue, ranges):
-    """ระยะจาก H ไปยังช่วงที่ใกล้ที่สุด (H วนรอบที่ 180 จึงต้องคิดแบบวงกลม)"""
+    """Distance from a hue to the nearest range, wrapping at 180."""
     best = 180.0
     for lo, hi in ranges:
         if lo <= hue <= hi:
@@ -184,19 +197,19 @@ def hue_gap(hue, ranges):
 
 
 def mean_hue(roi):
-    """H เฉลี่ยแบบวงกลมของพิกเซลที่ "มีสี" ที่สุดในช่อง (S สูงสุด 20% แรก)"""
+    """Circular mean hue of the most saturated 20% of the cell."""
     h, s, v = cv.split(roi)
     thr = float(np.percentile(s, 80))
     sel = (s >= max(40.0, thr)) & (v >= 40)
     if not np.any(sel):
         sel = np.ones_like(s, dtype=bool)
-    ang = np.deg2rad(h[sel].astype(np.float32) * 2.0)     # H 0-179 -> องศา 0-358
+    ang = np.deg2rad(h[sel].astype(np.float32) * 2.0)     # H 0-179 -> degrees 0-358
     deg = math.degrees(math.atan2(float(np.sin(ang).mean()), float(np.cos(ang).mean()))) % 360
     return deg / 2.0
 
 
 def mask_center(mask, rx, ry):
-    """จุดกึ่งกลางของมาสก์ (แปลงกลับเป็นพิกัดในภาพเต็ม)"""
+    """Mask centroid, mapped back to full-image coordinates."""
     m = cv.moments(mask, binaryImage=True)
     if not m["m00"]:
         return None
@@ -204,24 +217,16 @@ def mask_center(mask, rx, ry):
 
 
 def classify_cell(hsv, cfg, cell):
-    """สรุปสีของช่องหนึ่ง — ทางหลักคือ "เจอสีจริง" ส่วนที่เหลือเป็นระบบสำรองไล่ระดับลงมา
-
-    1. นับพิกเซลของทุกสีในช่อง สีที่มากที่สุดชนะ (หลายสีปนกันตัดสินด้วยจำนวน)
-       ถึงเกณฑ์ min_area -> จบ (sure=True, reason="found")
-    2. ไม่ถึงเกณฑ์ -> ขยาย HSV range ทีละขั้นจนถึง expand_limit แล้วนับใหม่
-       (sure=True, reason="grow")
-    -- ต่อจากนี้คือ "หาสีไม่เจอ" แล้ว ถือเป็นการเดา (sure=False) --
-    3. ยังพอมีพิกเซลของสีอยู่บ้าง (แค่ไม่ถึงเกณฑ์) -> เอาสีที่มีมากที่สุดเท่าที่เคยเห็น (weak)
-    4. ไม่เหลือพิกเซลของสีไหนเลย -> เดาจาก H เฉลี่ยของช่อง เอาสีที่ใกล้ที่สุด (hue)
-
-    คืน dict: color, count, grow, sure, reason, center, scores"""
+    """Decide the colour of one cell: most pixels wins; widen the range if nothing
+    passes min_area; then fall back to the best partial evidence, then to mean hue.
+    Returns dict: color, count, grow, sure, reason, center, scores."""
     roi, rx, ry = cell_roi(hsv, cfg, cell)
     if roi is None or roi.size == 0:
         return {"color": None, "count": 0, "grow": 0, "sure": False,
                 "reason": "empty", "center": None, "scores": {}}
     need = min_area_of(cfg)
     scores = {}
-    seen = None          # หลักฐานที่ดีที่สุดเท่าที่เจอ (ยังไม่ถึงเกณฑ์)
+    seen = None          # best evidence so far, still below min_area
     for grow in range(cfg.get("expand_limit", 6) + 1):
         masks = {c: color_mask(roi, spec, grow) for c, spec in cfg["colors"].items()}
         scores = {c: int(cv.countNonZero(m)) for c, m in masks.items()}
@@ -235,10 +240,10 @@ def classify_cell(hsv, cfg, cell):
                     "center": mask_center(masks[best], rx, ry)}
 
     x, y, w, h = cell_rect(cfg, cell)
-    if seen:      # (3) มีร่องรอยสีอยู่ แค่จางหรือเล็กเกินเกณฑ์
+    if seen:      # (3) some pixels of a colour, just faint or small
         return {"color": seen["color"], "count": seen["count"], "grow": seen["grow"],
                 "sure": False, "reason": "weak", "center": seen["center"], "scores": scores}
-    # (4) ไม่เหลืออะไรให้ยึดเลย เดาจากโทนสีเฉลี่ยของช่อง
+    # (4) nothing to go on, guess from the cell mean hue
     hue = mean_hue(roi)
     guess = min(cfg["colors"], key=lambda c: hue_gap(hue, cfg["colors"][c]["h"]))
     return {"color": guess, "count": 0, "grow": None, "sure": False, "reason": "hue",
@@ -246,18 +251,18 @@ def classify_cell(hsv, cfg, cell):
 
 
 def analyse(frame, cfg):
-    """ตรวจทุกช่อง (ยกเว้นช่องกลาง) คืน {ช่อง: ผลของช่องนั้น}"""
+    """Every cell except the centre. Returns {cell: result}."""
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
     return {cell: classify_cell(hsv, cfg, cell) for cell in BLOCK_CELLS}
 
 
 def detect(frame, cfg):
-    """{ช่อง: สี} ครบ 8 ช่อง — ทุกช่องได้สีเสมอ"""
+    """{cell: color} for all 8 cells."""
     return {cell: r["color"] for cell, r in analyse(frame, cfg).items() if r["color"]}
 
 
 def summary(result, cfg):
-    """ข้อความสรุปหนึ่งบรรทัดสำหรับแถบล่างของ UI (อังกฤษ)"""
+    """One-line status for the bottom of the window."""
     counts = {}
     for r in result.values():
         if r["color"]:
@@ -269,21 +274,22 @@ def summary(result, cfg):
         note += " | grow " + " ".join(f"{c}+{g}" for c, g in sorted(grown.items(), key=str))
     if guessed:
         note += " | guess " + " ".join(f"{c}({w})" for c, w in sorted(guessed, key=lambda t: str(t[0])))
-    return note + f" | min_area={min_area_of(cfg)}px"
+    rot = cfg.get("rotation", 0) % 4
+    return note + (f" | rot {rot * 90}" if rot else "") + f" | min_area={min_area_of(cfg)}px"
 
 
 # ==========================================
-# 📷 กล้อง
+# camera
 # ==========================================
 def _device_key(src):
-    """ใช้เทียบว่าเป็นกล้องตัวเดียวกันไหม (path กับ index อาจชี้ตัวเดียวกัน)"""
+    """Key for comparing devices; a path and an index may be the same camera."""
     path = src if isinstance(src, str) else f"/dev/video{src}"
     return os.path.realpath(path)
 
 
 def camera_candidates(cfg):
-    """ลำดับการลองเปิดกล้อง: ตัวที่ตั้งไว้ใน camera_index ก่อน
-    แล้วค่อยไล่กล้องอื่นที่มีในเครื่อง — ถ้าไม่ได้เสียบกล้องเสริม ก็จะตกมาที่กล้องโน้ตบุ๊กเอง"""
+    """camera_index first, then the other cameras on the machine, so an
+    unplugged USB camera falls back to the built-in one."""
     seen, out = set(), []
     for src in ([cfg["camera_index"]]
                 + sorted(glob.glob("/dev/v4l/by-id/*-video-index0"))
@@ -296,7 +302,7 @@ def camera_candidates(cfg):
 
 
 def _quiet_opencv(on):
-    """ปิด warning ของ OpenCV ตอนไล่เปิดกล้องทีละตัว (ไม่งั้นรกเต็มจอ)"""
+    """Silence OpenCV warnings while probing cameras one by one."""
     try:
         from cv2.utils import logging as cvlog
         lv = cvlog.getLogLevel()
@@ -307,7 +313,7 @@ def _quiet_opencv(on):
 
 
 def open_camera(cfg):
-    """เปิดกล้องตัวแรกที่ใช้งานได้จริง (เปิดติด + อ่านภาพออก) คืน (cam, ที่มาที่ใช้จริง)"""
+    """First camera that opens AND reads a frame. Returns (cam, source)."""
     want = cfg["camera_index"]
     prev, tried = _quiet_opencv(True), []
     try:
@@ -315,7 +321,7 @@ def open_camera(cfg):
             cam = cv.VideoCapture(src, cv.CAP_V4L2) if isinstance(src, str) else cv.VideoCapture(src)
             if cam.isOpened() and cam.read()[0]:
                 if _device_key(src) != _device_key(want):
-                    print(f"⚠️ เปิดกล้องที่ตั้งไว้ ({want}) ไม่ได้ — ใช้ {src} แทน")
+                    print(f"! cannot open configured camera ({want}), using {src}")
                 return cam, src
             cam.release()
             tried.append(str(src))
@@ -327,11 +333,11 @@ def open_camera(cfg):
 
 def grab_frame(cfg):
     cam, src = open_camera(cfg)
-    print(f"📷 ใช้กล้อง: {src}")
+    print(f"camera: {src}")
     try:
         frame = None
         for _ in range(max(1, cfg.get("warmup_frames", 25))):
-            ok, f = cam.read()          # ทิ้งเฟรมแรกๆ ระหว่างกล้องปรับแสง
+            ok, f = cam.read()          # drop frames while exposure settles
             if ok and f is not None:
                 frame = f
         if frame is None:
@@ -342,7 +348,7 @@ def grab_frame(cfg):
 
 
 def get_blocks():
-    """API หลักที่ main_0.7 เรียกใช้ คืน {ช่อง: สี} ในมุมมองภาพกล้อง (ครบ 8 ช่อง)"""
+    """Main entry point for the robot program. {cell: color} in camera view."""
     cfg = load_config()
     result = analyse(grab_frame(cfg), cfg)
     blocks = {cell: r["color"] for cell, r in result.items() if r["color"]}
@@ -350,28 +356,28 @@ def get_blocks():
     weak = [c for c, r in result.items() if r["reason"] == "weak"]
     hue = [c for c, r in result.items() if r["reason"] == "hue"]
     if grown:
-        print("ℹ️ ต้องขยาย range: " + ", ".join(f"ช่อง {c}+{g}" for c, g in sorted(grown.items())))
+        print("range widened: " + ", ".join(f"cell {c}+{g}" for c, g in sorted(grown.items())))
     if weak:
-        print("⚠️ สีจาง/เล็กกว่าเกณฑ์ ใช้สีที่มีมากที่สุดในช่องแทน: "
-              + ", ".join(f"ช่อง {c}={blocks[c]}" for c in sorted(weak)))
+        print("! faint/small, used the most common colour: "
+              + ", ".join(f"cell {c}={blocks[c]}" for c in sorted(weak)))
     if hue:
-        print("⚠️ ไม่เจอสีในช่องเลย เดาจากโทนสีเฉลี่ย (ไม่ชัวร์): "
-              + ", ".join(f"ช่อง {c}={blocks[c]}" for c in sorted(hue)))
+        print("! no colour found, guessed from mean hue: "
+              + ", ".join(f"cell {c}={blocks[c]}" for c in sorted(hue)))
     return blocks
 
 
 # ==========================================
-# 🖥️ UI ตั้งกรอบ 3x3 (รันไฟล์นี้ตรงๆ)
+# setup window (run this file directly)
 # ==========================================
 HELP = ["w/a/s/d = move grid", "+/- (or z/x) = zoom grid", "t/g = taller/shorter",
-        "f/h = wider/narrower", "[ / ] = min area %", "m = mask overlay", "k = SAVE", "q = quit"]
+        "f/h = wider/narrower", "[ / ] = min area %", "r = rotate numbers 90",
+        "m = mask overlay", "k = SAVE", "q = quit"]
 
-GUESS_GRAY = (130, 130, 130)   # ชิปสี + จุดกึ่งกลางของช่องที่ "เดา" ใช้สีเทา ไม่ใช่สีจริง
+GUESS_GRAY = (130, 130, 130)   # chip and dot colour for guessed cells
 
 
 def mask_overlay(frame, cfg):
-    """ภาพจริงหรี่ลง 50% แล้วทาบมาสก์ของทุกสีด้วยสีประจำหมวดของมัน
-    เห็นทีเดียวว่าแต่ละสีจับอะไรไปบ้าง และทับพื้นที่กันตรงไหน"""
+    """Frame at 50% brightness with every colour mask painted in its own colour."""
     view = (frame * 0.5).astype(np.uint8)
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
     for color, spec in cfg["colors"].items():
@@ -386,22 +392,22 @@ def draw_overlay(frame, cfg, result, note):
     for i in (1, 2):
         cv.line(frame, (x0 + i * sx, y0), (x0 + i * sx, y0 + h), (255, 255, 255), 1)
         cv.line(frame, (x0, y0 + i * sy), (x0 + w, y0 + i * sy), (255, 255, 255), 1)
-    for (row, col), cell in CELL_AT.items():
+    for (row, col), cell in cell_at(cfg).items():
         r = result.get(cell) or {}
         color, sure = r.get("color"), r.get("sure")
         bgr = DRAW_BGR.get(color, (200, 200, 200))
-        # กรอบย่อยที่ใช้ตัดสินสีของช่องนั้นจริงๆ
+        # the box actually used to decide the cell
         if cell != "c":
             cx, cy, cw, ch = cell_rect(cfg, cell)
             cv.rectangle(frame, (cx, cy), (cx + cw, cy + ch), (90, 90, 90), 1)
-        # มุมซ้ายบนของช่อง: เลขช่อง
+        # top-left: cell number
         cv.putText(frame, str(cell), (x0 + col * sx + 6, y0 + row * sy + 20),
                    cv.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-        # มุมขวาล่างของช่อง: สีที่สรุปได้ (มี ? ต่อท้าย = เดาเอา ไม่ได้เจอสีชัดๆ)
+        # bottom-right: decided colour, (?) means guessed
         bx, by = x0 + (col + 1) * sx - 10, y0 + (row + 1) * sy - 10
         if color:
-            # เจอจริง = ชิปสีจริง | เดา = ชิปสีเทา แต่ตัวอักษรยังเป็นสีนั้นอยู่ ต่อท้ายด้วย (?)
-            # จัดให้ขอบขวาของตัวอักษรชนขอบช่องพอดี ป้ายยาว "g(?)" จะได้ไม่ล้นออกนอกช่อง
+            # found = real chip colour, guessed = grey chip but the letter keeps its colour
+            # right-align the label so "g(?)" stays inside the cell
             label = color if sure else color + "(?)"
             (tw, _), _ = cv.getTextSize(label, cv.FONT_HERSHEY_SIMPLEX, 0.55, 2)
             tx = bx - tw
@@ -411,7 +417,7 @@ def draw_overlay(frame, cfg, result, note):
             cv.rectangle(frame, (tx - 22, by - 15), (tx - 6, by + 1), (255, 255, 255), 1)
         elif cell != "c":
             cv.putText(frame, "-", (bx - 8, by), cv.FONT_HERSHEY_SIMPLEX, 0.6, (120, 120, 120), 2)
-    # จุดอ้างอิงกึ่งกลางของสีที่ชนะในแต่ละช่อง
+    # centroid of the winning colour in each cell
     for cell, r in result.items():
         if not r.get("center") or not r.get("color"):
             continue
@@ -434,20 +440,20 @@ def setup():
     try:
         cam, src = open_camera(cfg)
     except CameraError as e:
-        print(f"❌ {e}")
+        print(f"! {e}")
         return
-    print(f"📷 ใช้กล้อง: {src}")
+    print(f"camera: {src}")
     if _device_key(src) != _device_key(cfg["camera_index"]):
-        print("   ⚠️ ไม่ใช่กล้องที่ตั้งไว้ — กรอบที่จัดตอนนี้จะตรงกับกล้องตัวนี้เท่านั้น")
-        print(f"   ถ้าจะใช้ตัวนี้ถาวร แก้ camera_index ใน camera_config.json เป็น {src!r}")
-    mask_view = False     # True = ทาบมาสก์ของทุกสีบนภาพที่หรี่ลง 50%
-    print("🖥️ จัดกรอบให้ตรงกับตาราง 3x3 แล้วกด k เพื่อบันทึก (q = ออก) — ข้อความบนหน้าต่างเป็นอังกฤษ")
-    print("   ชิปสีเทา + (?) = ช่องนั้นหาสีไม่เจอ เลยใช้ระบบสำรองเดาให้ (ตัวอักษรยังเป็นสีที่เดาได้)")
-    print("   กด m = ทาบมาสก์ของทุกสีลงบนภาพจริงที่หรี่ลง 50% เพื่อดูว่าแต่ละสีจับอะไรไปบ้าง")
+        print("  ! not the configured camera - this frame fits THIS camera only")
+        print(f"  to keep it, set camera_index in camera_config.json to {src!r}")
+    mask_view = False     # True = mask overlay on a dimmed frame
+    print("align the 3x3 frame, press k to SAVE, q to quit")
+    print("  grey chip + (?) = that cell was guessed, not found")
+    print("  m = paint every colour mask over a dimmed frame")
     while True:
         ok, frame = cam.read()
         if not ok:
-            print("❌ อ่านภาพจากกล้องไม่ได้")
+            print("! cannot read a frame")
             break
         result = analyse(frame, cfg)
         note = summary(result, cfg)
@@ -473,9 +479,9 @@ def setup():
             f["cx"] -= 5
         elif key == ord("d"):
             f["cx"] += 5
-        elif key in (ord("+"), ord("="), ord("z")):      # ซูมเข้า (กรอบใหญ่ขึ้น)
+        elif key in (ord("+"), ord("="), ord("z")):      # zoom in (bigger frame)
             f["w"], f["h"] = f["w"] + 6, f["h"] + 6
-        elif key in (ord("-"), ord("_"), ord("x")):      # ซูมออก (กรอบเล็กลง)
+        elif key in (ord("-"), ord("_"), ord("x")):      # zoom out (smaller frame)
             f["w"], f["h"] = max(30, f["w"] - 6), max(30, f["h"] - 6)
         elif key == ord("t"):
             f["h"] += 6
@@ -489,6 +495,8 @@ def setup():
             cfg["min_area_ratio"] = round(max(0.002, cfg.get("min_area_ratio", 0.04) - 0.005), 4)
         elif key == ord("]"):
             cfg["min_area_ratio"] = round(min(0.5, cfg.get("min_area_ratio", 0.04) + 0.005), 4)
+        elif key == ord("r"):
+            cfg["rotation"] = (cfg.get("rotation", 0) + 1) % 4
         elif key == ord("m"):
             mask_view = not mask_view
         elif key == ord("k"):

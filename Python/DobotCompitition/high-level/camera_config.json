@@ -1,13 +1,16 @@
 {
     "camera_index": "/dev/v4l/by-id/usb-046d_C270_HD_WEBCAM_8106DF10-video-index0",
+    "warmup_frames": 25,
     "frame": {
-        "cx": 320,
-        "cy": 240,
-        "w": 300,
-        "h": 300
+        "cx": 340,
+        "cy": 190,
+        "w": 372,
+        "h": 372
     },
-    "min_area": 400,
+    "min_area_ratio": 0.04,
+    "cell_inset": 0.15,
     "expand_limit": 6,
+    "rotation": 2,
     "colors": {
         "g": {
             "h": [
@@ -77,6 +80,5 @@
                 255
             ]
         }
-    },
-    "warmup_frames": 25
+    }
 }
