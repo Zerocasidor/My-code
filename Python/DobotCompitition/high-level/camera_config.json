@@ -3,9 +3,9 @@
     "warmup_frames": 25,
     "frame": {
         "cx": 340,
-        "cy": 190,
-        "w": 372,
-        "h": 372
+        "cy": 245,
+        "w": 366,
+        "h": 366
     },
     "min_area_ratio": 0.04,
     "cell_inset": 0.15,

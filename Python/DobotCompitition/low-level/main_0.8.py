@@ -797,7 +797,7 @@ def reset_positions(settings):
         print("cancelled")
         return
     settings["positions"] = {k: None for k in settings["positions"]}
-    print("cleared - press [4] Save&Exit or [8] to write the file")
+    print("cleared - press [4] Save or [8] to write the file")
 
 
 def set_ground(device, settings):
@@ -831,7 +831,7 @@ def main():
             dirty = " *unsaved" if unsaved_changes(settings) else ""
             tag = "SIM " if is_sim(device) else ""
             choice = input(
-                f"\n{tag}[1]Run [2]Teach&Save [3]SetGround [4]Save&Exit [5]ShowLayout\n"
+                f"\n{tag}[1]Run [2]Teach&Save [3]SetGround [4]Save [5]ShowLayout\n"
                 f"[6]ResetPositions [7]Temp:{temp_state} [8]Order:{primary or '-'}{backup}"
                 f"{dirty} [Enter]Exit > ").strip()
             if choice == "1":
@@ -852,7 +852,6 @@ def main():
                     set_ground(device, settings)
             elif choice == "4":
                 save_settings(settings)
-                break
             elif choice == "5":
                 show_layout(settings, device)
             elif choice == "8":
