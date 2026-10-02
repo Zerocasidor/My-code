@@ -2,61 +2,277 @@
     "port": "/dev/ttyUSB0",
     "robot_speed": 100,
     "robot_accel": 100,
-    "block_height": 23.89,
-    "ground_z": -65.18,
+    "block_height": 23.65,
+    "ground_z": -65.78,
     "grip_offset": 0.0,
     "keep_rotation": true,
-    "temp_orders": [],
+    "temp_count": 0,
     "order": [
+        2,
         1,
-        5,
-        8,
-        7
+        7,
+        6
     ],
     "colors": [
+        "b",
+        "r",
         "g",
-        "y",
-        "g",
-        "b"
+        "r"
     ],
-    "last_input": "g y g b",
+    "last_input": "b r g r",
     "flip_camera": false,
+    "corner_ref": "top",
+    "teach_slot": "normal",
+    "saves": {
+        "quick": {
+            "ground_z": -64.84,
+            "block_height": 25.0,
+            "corner_ref": "floor",
+            "temp_count": 0,
+            "positions": {
+                "grid_1": {
+                    "x": 269.88,
+                    "y": 33.59,
+                    "z": -64.94,
+                    "r": 7.1
+                },
+                "grid_3": {
+                    "x": 270.0,
+                    "y": 33.48,
+                    "z": -65.06,
+                    "r": 7.07
+                },
+                "grid_8": {
+                    "x": 204.13,
+                    "y": -36.4,
+                    "z": -64.53,
+                    "r": -10.11
+                },
+                "grid_6": null,
+                "temp_top": null,
+                "temp_last": null,
+                "cell_1": null,
+                "cell_2": null,
+                "cell_3": null,
+                "cell_4": null,
+                "cell_5": null,
+                "cell_6": null,
+                "cell_7": null,
+                "cell_8": null,
+                "cell_c": null,
+                "temp_1": null,
+                "temp_2": null,
+                "temp_3": null,
+                "temp_4": null
+            }
+        },
+        "normal": {
+            "ground_z": -65.78,
+            "block_height": 23.65,
+            "corner_ref": "top",
+            "temp_count": 0,
+            "positions": {
+                "grid_1": {
+                    "x": 275.77,
+                    "y": 30.7,
+                    "z": -41.83,
+                    "r": -0.79
+                },
+                "grid_3": {
+                    "x": 275.08,
+                    "y": -35.14,
+                    "z": -42.08,
+                    "r": -14.42
+                },
+                "grid_8": {
+                    "x": 210.81,
+                    "y": -37.7,
+                    "z": -41.92,
+                    "r": -17.28
+                },
+                "grid_6": {
+                    "x": 211.98,
+                    "y": 32.67,
+                    "z": -42.72,
+                    "r": 1.62
+                },
+                "temp_top": {
+                    "x": 283.92,
+                    "y": 75.7,
+                    "z": -65.74,
+                    "r": 7.79
+                },
+                "temp_last": {
+                    "x": 196.26,
+                    "y": 77.6,
+                    "z": -65.83,
+                    "r": 14.43
+                },
+                "cell_1": null,
+                "cell_2": null,
+                "cell_3": null,
+                "cell_4": null,
+                "cell_5": null,
+                "cell_6": null,
+                "cell_7": null,
+                "cell_8": null,
+                "cell_c": null,
+                "temp_1": null,
+                "temp_2": null,
+                "temp_3": null,
+                "temp_4": null
+            }
+        },
+        "strict": {
+            "ground_z": -66.01,
+            "block_height": 18.87,
+            "corner_ref": "top",
+            "temp_count": 0,
+            "positions": {
+                "grid_1": null,
+                "grid_3": null,
+                "grid_8": null,
+                "grid_6": null,
+                "temp_top": null,
+                "temp_last": null,
+                "cell_1": {
+                    "x": 197.93,
+                    "y": 96.74,
+                    "z": -48.52,
+                    "r": 26.05
+                },
+                "cell_2": {
+                    "x": 205.46,
+                    "y": 69.82,
+                    "z": -47.91,
+                    "r": 18.77
+                },
+                "cell_3": {
+                    "x": 214.39,
+                    "y": 44.71,
+                    "z": -47.12,
+                    "r": 11.78
+                },
+                "cell_4": {
+                    "x": 165.53,
+                    "y": 83.76,
+                    "z": -47.52,
+                    "r": 26.84
+                },
+                "cell_5": {
+                    "x": 182.42,
+                    "y": 33.05,
+                    "z": -46.82,
+                    "r": 10.27
+                },
+                "cell_6": {
+                    "x": 134.55,
+                    "y": 72.28,
+                    "z": -46.47,
+                    "r": 28.24
+                },
+                "cell_7": {
+                    "x": 141.4,
+                    "y": 48.27,
+                    "z": -46.08,
+                    "r": 18.85
+                },
+                "cell_8": {
+                    "x": 149.77,
+                    "y": 23.23,
+                    "z": -46.47,
+                    "r": 8.81
+                },
+                "cell_c": {
+                    "x": 174.55,
+                    "y": 57.16,
+                    "z": -47.37,
+                    "r": 18.13
+                },
+                "temp_1": {
+                    "x": 174.61,
+                    "y": 57.09,
+                    "z": -47.53,
+                    "r": 18.11
+                },
+                "temp_2": {
+                    "x": 197.77,
+                    "y": 130.7,
+                    "z": -72.35,
+                    "r": 33.46
+                },
+                "temp_3": {
+                    "x": 139.0,
+                    "y": 107.2,
+                    "z": -72.35,
+                    "r": 37.64
+                },
+                "temp_4": {
+                    "x": 110.93,
+                    "y": 95.01,
+                    "z": -71.81,
+                    "r": 40.58
+                }
+            }
+        }
+    },
     "positions": {
         "grid_1": {
-            "x": 276.91,
-            "y": 1.41,
-            "z": -41.8,
-            "r": 0.29
+            "x": 275.77,
+            "y": 30.7,
+            "z": -41.83,
+            "r": -0.79
         },
         "grid_3": {
-            "x": 267.64,
-            "y": -66.22,
-            "z": -40.24,
-            "r": -13.9
+            "x": 275.08,
+            "y": -35.14,
+            "z": -42.08,
+            "r": -14.42
         },
         "grid_8": {
-            "x": 202.11,
-            "y": -58.11,
-            "z": -40.69,
-            "r": -16.04
+            "x": 210.81,
+            "y": -37.7,
+            "z": -41.92,
+            "r": -17.28
         },
         "grid_6": {
-            "x": 211.95,
-            "y": 7.35,
-            "z": -42.43,
-            "r": 1.98
+            "x": 211.98,
+            "y": 32.67,
+            "z": -42.72,
+            "r": 1.62
         },
         "temp_top": {
-            "x": 288.69,
-            "y": 43.54,
-            "z": -65.47,
-            "r": 8.57
+            "x": 283.92,
+            "y": 75.7,
+            "z": -65.74,
+            "r": 7.79
         },
         "temp_last": {
-            "x": 201.23,
-            "y": 54.05,
-            "z": -64.89,
-            "r": 15.03
-        }
-    }
+            "x": 196.26,
+            "y": 77.6,
+            "z": -65.83,
+            "r": 14.43
+        },
+        "cell_1": null,
+        "cell_2": null,
+        "cell_3": null,
+        "cell_4": null,
+        "cell_5": null,
+        "cell_6": null,
+        "cell_7": null,
+        "cell_8": null,
+        "cell_c": null,
+        "temp_1": null,
+        "temp_2": null,
+        "temp_3": null,
+        "temp_4": null
+    },
+    "joint_speed": 200.0,
+    "joint_accel": 200.0,
+    "coord_speed": 100.0,
+    "coord_accel": 100.0,
+    "speed_ratio": 100.0,
+    "accel_ratio": 100.0,
+    "suck_ms": 50,
+    "release_ms": 100
 }

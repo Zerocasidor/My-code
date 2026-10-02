@@ -374,7 +374,7 @@ def check_z_scheme(positions, settings):
     """กันเคสอันตราย: ถ้ามุมกริดถูกสอนที่ "พื้น" แบบเวอร์ชันก่อน z ที่คำนวณได้จะต่ำไปทั้งกระดาน
     แขนจะกดลงโต๊ะ — คืน (ข้อความ, ต้องหยุดไหม) หรือ None ถ้าปกติ
 
-    0.75: เดิมเช็คได้เฉพาะตอนสอนจุดพักไว้แล้ว ถ้าปิด temp และยังไม่ได้สอนจุดพัก
+    1.11: เดิมเช็คได้เฉพาะตอนสอนจุดพักไว้แล้ว ถ้าปิด temp และยังไม่ได้สอนจุดพัก
     จะไม่มีการตรวจเลย (ด่านหลุด) ตอนนี้ถอยไปใช้ ground_z ซึ่ง run_operation บังคับให้มีอยู่แล้ว"""
     exact = measured_block_height(positions)            # วัดจากจุดพัก = แม่น
     h = exact if exact is not None else measured_block_height(positions, settings.get("ground_z"))
@@ -470,7 +470,7 @@ def valid_colors(colors):
 def ask_input(settings, numbers_only=False, enter_hint=None):
     """รับลำดับ 4 ตัว ได้ทั้ง 'เลขช่อง' (1-8 ไม่ซ้ำ) และ 'สี' (g/r/y/b ซ้ำได้ไม่เกินสีละ 2)
     คืน ("order", [ช่อง...]) หรือ ("colors", [สี...]) หรือ None"""
-    # 0.75: โหมด numbers_only (fallback ตอนกล้องพัง) ต้องเสนอ "ลำดับเลข" เป็นค่าเริ่มต้น
+    # 1.11: โหมด numbers_only (fallback ตอนกล้องพัง) ต้องเสนอ "ลำดับเลข" เป็นค่าเริ่มต้น
     # เดิมใช้ last_input ซึ่งตอนนั้นเป็นชุดสี -> หน้าจอบอก Enter=ค่าเดิม แต่กด Enter แล้วพังแน่นอน
     default_order = " ".join(str(b) for b in settings.get("order", []))
     cur = default_order if numbers_only else (settings.get("last_input") or default_order)
@@ -599,7 +599,7 @@ def walk_layout(device, settings, grid, temps):
 
 
 def show_layout(settings, device=None):
-    """แสดงพิกัดที่คำนวณได้ทั้งหมด และเลือกให้แขนเดินไล่ทุกจุดเพื่อตรวจได้ (ยกมาจาก main_0.6)"""
+    """แสดงพิกัดที่คำนวณได้ทั้งหมด และเลือกให้แขนเดินไล่ทุกจุดเพื่อตรวจได้ (ยกมาจาก main_1.00)"""
     grid = build_grid(settings["positions"])
     temps = build_temps(settings["positions"], settings.get("block_height", 25.0))
     if not grid:

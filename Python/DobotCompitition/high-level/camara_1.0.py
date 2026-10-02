@@ -1,4 +1,4 @@
-"""camara_1.0 — ตรวจสีบล็อกในตาราง 3x3 แล้วส่งให้ฝั่ง low-level (main_0.7)
+"""camara_1.0 — ตรวจสีบล็อกในตาราง 3x3 แล้วส่งให้ฝั่ง low-level (main_1.10)
 
 เรียกจากโปรแกรมอื่น:  get_blocks() -> {ช่อง: สี} เช่น {1: "g", 3: "r", ...}
 ตั้งค่ากรอบ/สี (UI):   python3 camara_1.0.py
@@ -7,7 +7,7 @@
     1 2 3
     4 c 5
     6 7 8
-ฝั่ง main_0.7 เป็นคนกลับด้าน 180° เองถ้าตั้ง flip_camera ไว้
+ฝั่ง main_1.10 เป็นคนกลับด้าน 180° เองถ้าตั้ง flip_camera ไว้
 """
 
 import os
@@ -284,7 +284,7 @@ def grab_frame(cfg):
 
 
 def get_blocks():
-    """API หลักที่ main_0.7 เรียกใช้ คืน {ช่อง: สี} ในมุมมองภาพกล้อง"""
+    """API หลักที่ main_1.10 เรียกใช้ คืน {ช่อง: สี} ในมุมมองภาพกล้อง"""
     cfg = load_config()
     grown = {}
     blocks = detect(grab_frame(cfg), cfg, grown)

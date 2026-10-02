@@ -1,5 +1,5 @@
-"""main_0.9 - Dobot Magician block-stacking (final).
-Same behaviour as main_0.8 plus [9] Camera setup.
+"""main_1.20 - Dobot Magician block-stacking (final).
+Same behaviour as main_1.12 plus [9] Camera setup.
 Run with --sim for simulation (no robot needed)."""
 
 import os
